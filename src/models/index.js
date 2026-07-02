@@ -429,6 +429,15 @@ Item.hasOne(Inventory, { foreignKey: 'item_id' });
 Item.hasOne(ReorderRule, { foreignKey: 'item_id' });
 ReorderRule.belongsTo(Item, { foreignKey: 'item_id' });
 Item.belongsTo(Vendor, { as: 'PreferredVendor', foreignKey: 'preferred_vendor_id' });
+PurchaseRequest.hasMany(Approval, { foreignKey: 'approvable_id', constraints: false, scope: { approvable_type: 'purchase_request' } });
+Approval.belongsTo(PurchaseRequest, { foreignKey: 'approvable_id', constraints: false });
+
+PurchaseOrder.hasMany(Approval, { foreignKey: 'approvable_id', constraints: false, scope: { approvable_type: 'purchase_order' } });
+Approval.belongsTo(PurchaseOrder, { foreignKey: 'approvable_id', constraints: false });
+
+User.hasMany(Approval, { foreignKey: 'approver_id', constraints: false });
+Approval.belongsTo(User, { as: 'Approver', foreignKey: 'approver_id', constraints: false });
+
 module.exports = {
   sequelize,
   Company, Role, Permission, RolePermission, User,
