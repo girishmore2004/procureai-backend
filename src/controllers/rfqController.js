@@ -3,9 +3,9 @@ const { Rfq, RfqVendor, Vendor, PurchaseRequest, PurchaseRequestItem, Quote } = 
 const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
-const { sendRfqEmail } = require('../services/emailService');
-const { notifyUser } = require('../services/notificationService');
-
+// const { sendRfqEmail } = require('../services/emailService');
+// const { notifyUser } = require('../services/notificationService');
+const { sendRfqEmail, notifyUser } = require('../services/notificationService');
 exports.list = asyncHandler(async (req, res) => {
   const { page, perPage, limit, offset } = paginate(req.query);
   const where = { company_id: req.companyId };
