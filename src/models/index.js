@@ -426,7 +426,7 @@ InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 Item.hasOne(Inventory, { foreignKey: 'item_id' });
 Item.hasOne(ReorderRule, { foreignKey: 'item_id' });
 ReorderRule.belongsTo(Item, { foreignKey: 'item_id' });
-
+Item.belongsTo(Vendor, { as: 'PreferredVendor', foreignKey: 'preferred_vendor_id' });
 module.exports = {
   sequelize,
   Company, Role, Permission, RolePermission, User,
