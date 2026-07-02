@@ -391,9 +391,11 @@ Vendor.hasMany(VendorDocument, { foreignKey: 'vendor_id' });
 Vendor.hasMany(PurchaseOrder, { foreignKey: 'vendor_id' });
 Vendor.hasMany(VendorScore, { foreignKey: 'vendor_id' });
 
+
 PurchaseRequest.hasMany(PurchaseRequestItem, { foreignKey: 'purchase_request_id', as: 'items' });
 PurchaseRequestItem.belongsTo(PurchaseRequest, { foreignKey: 'purchase_request_id' });
 PurchaseRequestItem.belongsTo(Item, { foreignKey: 'item_id' });
+PurchaseRequest.belongsTo(User, { as: 'Requester', foreignKey: 'requested_by' });
 
 PurchaseRequest.hasMany(Rfq, { foreignKey: 'purchase_request_id' });
 Rfq.belongsTo(PurchaseRequest, { foreignKey: 'purchase_request_id' });
