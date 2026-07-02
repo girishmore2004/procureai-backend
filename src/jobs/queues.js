@@ -1,8 +1,14 @@
 const { Queue, Worker } = require('bullmq');
 const { extractQuoteFromFile, extractInvoice } = require('../services/aiService');
 
-const connection = { host: (process.env.REDIS_URL || 'redis://localhost:6379').replace('redis://', '').split(':')[0], port: parseInt((process.env.REDIS_URL || 'redis://localhost:6379').split(':')[2]) || 6379 };
-
+// const connection = { host: (process.env.REDIS_URL || 'redis://localhost:6379').replace('redis://', '').split(':')[0], port: parseInt((process.env.REDIS_URL || 'redis://localhost:6379').split(':')[2]) || 6379 };
+const redisUrl = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
+const connection = {
+  host: redisUrl.hostname,
+  port: parseInt(redisUrl.port) || 6379,
+  password: redisUrl.password || undefined,
+  tls: redisUrl.protocol === 'rediss:' ? {} : undefined,
+};
 const extractionQueue = new Queue('extraction', { connection });
 
 // Worker processes extraction jobs
