@@ -5,7 +5,8 @@ const { PurchaseOrder, PoItem, Quote, QuoteItem, Vendor, Rfq, User } = require('
 const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
-const { sendPoEmail } = require('../services/emailService');
+// const { sendPoEmail } = require('../services/emailService');
+const { sendPoEmail } = require('../services/notificationService');
 const { triggerApprovalFlow } = require('../services/approvalService');
 
 exports.list = asyncHandler(async (req, res) => {
