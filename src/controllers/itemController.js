@@ -15,11 +15,24 @@ exports.list = asyncHandler(async (req, res) => {
   paginatedResponse(res, result, { page, perPage });
 });
 
+// Converts '' / undefined / null to null, otherwise returns a Number.
+// Prevents Postgres "invalid input syntax for type numeric" errors from empty form fields.
+const toNumOrNull = (v) => (v === '' || v === undefined || v === null ? null : Number(v));
+
 exports.create = asyncHandler(async (req, res) => {
   const { name, category, subcategory, description, unit, brand, specification, hsn_sac, tax_rate, preferred_vendor_id, reorder_level, safety_stock, max_stock, avg_usage_per_month, lead_time_days } = req.body;
   if (!name) return errorResponse(res, 'VALIDATION_ERROR', 'Item name required');
   const item_code = await generateCode(Item, 'ITM', 'item_code', req.companyId);
-  const item = await Item.create({ company_id: req.companyId, name, item_code, category, subcategory, description, unit, brand, specification, hsn_sac, tax_rate, preferred_vendor_id, reorder_level, safety_stock, max_stock, avg_usage_per_month, lead_time_days });
+  const item = await Item.create({
+    company_id: req.companyId, name, item_code, category, subcategory, description, unit, brand, specification, hsn_sac,
+    tax_rate: toNumOrNull(tax_rate),
+    preferred_vendor_id: preferred_vendor_id || null,
+    reorder_level: toNumOrNull(reorder_level),
+    safety_stock: toNumOrNull(safety_stock),
+    max_stock: toNumOrNull(max_stock),
+    avg_usage_per_month: toNumOrNull(avg_usage_per_month),
+    lead_time_days: toNumOrNull(lead_time_days),
+  });
   // Auto-create inventory row
   await Inventory.findOrCreate({ where: { item_id: item.id, company_id: req.companyId }, defaults: { current_stock: 0 } });
   if (reorder_level) await ReorderRule.findOrCreate({ where: { item_id: item.id }, defaults: { reorder_point: reorder_level, reorder_quantity: avg_usage_per_month || 1 } });
