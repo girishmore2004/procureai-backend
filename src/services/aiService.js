@@ -100,30 +100,53 @@ ${rawText}
 ---
 `;
 
-async function extractTextFromFile(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
+// Loads the uploaded file's bytes regardless of where it lives: a local disk path (dev /
+// no-S3 fallback) or an https:// URL (S3 / S3-compatible storage). Using a buffer
+// throughout means the same extraction code works for both storage backends.
+async function loadFileBuffer(filePathOrUrl) {
+  if (/^https?:\/\//i.test(filePathOrUrl)) {
+    const res = await fetch(filePathOrUrl);
+    if (!res.ok) throw new Error(`Could not download the source file from storage (HTTP ${res.status}). It may have been removed.`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  try {
+    return fs.readFileSync(filePathOrUrl);
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      // The file lived only on local disk and is gone — most likely a server restart/redeploy
+      // wiped it (local disk here is ephemeral). Re-extract cannot recover this; the caller
+      // needs a fresh file. Give an actionable message instead of a raw stack-style error.
+      throw new Error('The originally uploaded file is no longer available on the server (it may have been lost in a restart). Please ask the vendor to resubmit the quote file, or enter the values manually below.');
+    }
+    throw e;
+  }
+}
+
+async function extractTextFromFile(filePathOrUrl) {
+  const ext = path.extname(filePathOrUrl.split('?')[0]).toLowerCase();
+  const buffer = await loadFileBuffer(filePathOrUrl);
   // For PDFs, Tesseract can handle image-based PDFs; for pure-text PDFs use pdfkit or pdf-parse
   if (['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.gif'].includes(ext)) {
-    const { data: { text } } = await Tesseract.recognize(filePath, 'eng', { logger: () => {} });
+    const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
     return text;
   }
   if (ext === '.pdf') {
     // Try Tesseract on PDF (works for image PDFs)
     try {
-      const { data: { text } } = await Tesseract.recognize(filePath, 'eng', { logger: () => {} });
+      const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
       return text;
     } catch (e) {
-      return fs.readFileSync(filePath, 'utf8');
+      return buffer.toString('utf8');
     }
   }
   if (['.txt', '.csv'].includes(ext)) {
-    return fs.readFileSync(filePath, 'utf8');
+    return buffer.toString('utf8');
   }
   if (['.xlsx', '.xls'].includes(ext)) {
     const XLSX = require('xlsx');
     let wb;
     try {
-      wb = XLSX.readFile(filePath);
+      wb = XLSX.read(buffer, { type: 'buffer' });
     } catch (e) {
       throw new Error(`Could not read this Excel file — it may be corrupted, password-protected, or not a valid .xlsx/.xls file (${e.message})`);
     }
