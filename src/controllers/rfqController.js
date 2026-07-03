@@ -87,13 +87,27 @@ exports.publicGetRfq = asyncHandler(async (req, res) => {
 
 // Public vendor-facing - submit quote via access token
 exports.publicSubmitQuote = asyncHandler(async (req, res) => {
-  const rv = await RfqVendor.findOne({ where: { access_token: req.params.token } });
+  // Include Rfq so we can read company_id off it - without this include,
+  // rv.Rfq is always undefined and Quote.create() below fails company_id
+  // validation (422 Unprocessable Content).
+  const rv = await RfqVendor.findOne({ where: { access_token: req.params.token }, include: [Rfq] });
   if (!rv) return errorResponse(res, 'NOT_FOUND', 'Invalid link', 404);
-  const { payment_terms, delivery_time_days, validity_date, items } = req.body;
+  const { payment_terms, delivery_time_days, validity_date } = req.body;
   const file = req.file;
-  const { extractQuoteFromFile } = require('../services/aiService');
+
+  // items is sent as a JSON string inside multipart/form-data - parse it
+  // back into an array. Guard against malformed/missing JSON.
+  let items = [];
+  if (req.body.items) {
+    try {
+      items = JSON.parse(req.body.items);
+    } catch (e) {
+      return errorResponse(res, 'VALIDATION_ERROR', 'Invalid items format', 422);
+    }
+  }
+
   const quote = await Quote.create({
-    rfq_vendor_id: rv.id, vendor_id: rv.vendor_id, company_id: rv.Rfq?.company_id || req.body.company_id,
+    rfq_vendor_id: rv.id, vendor_id: rv.vendor_id, company_id: rv.Rfq?.company_id,
     source_file_url: file ? (file.location || file.path || file.originalname) : null,
     source_type: file ? file.mimetype : 'manual',
     extraction_status: file ? 'pending' : 'done',
@@ -107,7 +121,7 @@ exports.publicSubmitQuote = asyncHandler(async (req, res) => {
   } else if (items?.length) {
     const { QuoteItem } = require('../models');
     await QuoteItem.bulkCreate(items.map((i) => ({ ...i, quote_id: quote.id, confidence_score: 1.0 })));
-    const total = items.reduce((s, i) => s + ((i.total_price || 0)), 0);
+    const total = items.reduce((s, i) => s + (Number(i.total_price) || 0), 0);
     await quote.update({ total_amount: total, extraction_status: 'done' });
   }
   okResponse(res, { message: 'Quote submitted', quote_id: quote.id }, 201);
