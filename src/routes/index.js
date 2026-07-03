@@ -30,6 +30,12 @@ router.post('/auth/reset-password', auth.resetPassword);
 // ── COMPANY SIGNUP (public) ──────────────────────────────────────────
 router.post('/companies', company.signup);
 
+// ── PUBLIC VENDOR QUOTE ENDPOINTS (no auth - token-based) ─────────────
+// Must stay ABOVE router.use(verifyToken) below, otherwise vendors
+// (who never log in) get a 401 Unauthorized on these routes.
+router.get('/public/rfq/:token', rfq.publicGetRfq);
+router.post('/public/rfq/:token/quote', upload.single('file'), rfq.publicSubmitQuote);
+
 // All routes below require authentication
 router.use(verifyToken);
 
@@ -147,9 +153,5 @@ router.get('/export/comparison', requirePermission('quotes.view'), exports_.expo
 router.get('/export/purchase-orders', requirePermission('po.view'), exports_.exportPurchaseOrders);
 router.get('/export/vendors', requirePermission('vendors.view'), exports_.exportVendors);
 router.get('/export/spend-report', requirePermission('analytics.view'), exports_.exportSpendReport);
-
-// ── PUBLIC VENDOR QUOTE ENDPOINTS (no auth - token-based) ─────────────
-router.get('/public/rfq/:token', rfq.publicGetRfq);
-router.post('/public/rfq/:token/quote', upload.single('file'), rfq.publicSubmitQuote);
 
 module.exports = router;
