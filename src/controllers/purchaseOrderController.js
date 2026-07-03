@@ -5,7 +5,6 @@ const { PurchaseOrder, PoItem, Quote, QuoteItem, Vendor, Rfq, User } = require('
 const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
-// const { sendPoEmail } = require('../services/emailService');
 const { sendPoEmail } = require('../services/notificationService');
 const { triggerApprovalFlow } = require('../services/approvalService');
 
@@ -23,6 +22,8 @@ exports.create = asyncHandler(async (req, res) => {
   if (!quote_id) return errorResponse(res, 'VALIDATION_ERROR', 'quote_id required');
   const quote = await Quote.findOne({ where: { id: quote_id, company_id: req.companyId, status: 'selected' }, include: [{ model: QuoteItem, as: 'items' }] });
   if (!quote) return errorResponse(res, 'NOT_FOUND', 'Selected quote not found', 404);
+  const existing = await PurchaseOrder.findOne({ where: { quote_id: quote.id, company_id: req.companyId } });
+  if (existing) return okResponse(res, existing, 200);
   const rv = await require('../models').RfqVendor.findByPk(quote.rfq_vendor_id);
   const po_number = await generateCode(PurchaseOrder, 'PO', 'po_number', req.companyId);
   const po = await PurchaseOrder.create({
