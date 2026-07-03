@@ -39,6 +39,50 @@ exports.getOne = asyncHandler(async (req, res) => {
   okResponse(res, rfq);
 });
 
+// Add one or more vendors to an RFQ that already exists — used when the buyer
+// wants to bring in another vendor after the RFQ was created (and possibly
+// already sent). Never touches vendors already on the RFQ, so their
+// tokens/status/responses are left alone.
+exports.addVendors = asyncHandler(async (req, res) => {
+  const { vendor_ids } = req.body;
+  if (!vendor_ids?.length) return errorResponse(res, 'VALIDATION_ERROR', 'vendor_ids required');
+
+  const rfq = await Rfq.findOne({
+    where: { id: req.params.id, company_id: req.companyId },
+    include: [{ model: RfqVendor, as: 'rfqVendors' }, { model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items' }] }],
+  });
+  if (!rfq) return errorResponse(res, 'NOT_FOUND', 'RFQ not found', 404);
+
+  const existingIds = new Set(rfq.rfqVendors.map((rv) => rv.vendor_id));
+  const newVendorIds = [...new Set(vendor_ids)].filter((vid) => !existingIds.has(vid));
+  if (!newVendorIds.length) return errorResponse(res, 'VALIDATION_ERROR', 'Selected vendor(s) are already on this RFQ');
+
+  const created = await RfqVendor.bulkCreate(
+    newVendorIds.map((vid) => ({ rfq_id: rfq.id, vendor_id: vid, access_token: uuidv4(), status: 'pending' })),
+    { returning: true }
+  );
+
+  // If the RFQ already went out to the original vendors, email just the new
+  // ones now instead of waiting for a "Send" action that only fires once.
+  const results = [];
+  if (rfq.status === 'sent') {
+    const newRows = await RfqVendor.findAll({ where: { id: created.map((c) => c.id) }, include: [Vendor] });
+    for (const rv of newRows) {
+      const uploadLink = `${process.env.APP_URL}/vendor/quote/${rv.access_token}`;
+      try {
+        await sendRfqEmail({ vendor: rv.Vendor, rfq, items: rfq.PurchaseRequest?.items || [], uploadLink });
+        await rv.update({ sent_at: new Date(), status: 'sent', channel: 'email' });
+        results.push({ vendor_id: rv.vendor_id, status: 'sent' });
+      } catch (e) {
+        results.push({ vendor_id: rv.vendor_id, status: 'failed', error: e.message });
+      }
+    }
+  }
+
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'rfq.vendors_added', entityType: 'Rfq', entityId: rfq.id, after: { vendor_ids: newVendorIds }, ip: req.ip });
+  okResponse(res, { added: newVendorIds.length, results }, 201);
+});
+
 exports.send = asyncHandler(async (req, res) => {
   const rfq = await Rfq.findOne({ where: { id: req.params.id, company_id: req.companyId }, include: [{ model: RfqVendor, as: 'rfqVendors', include: [Vendor] }, { model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items' }] }] });
   if (!rfq) return errorResponse(res, 'NOT_FOUND', 'RFQ not found', 404);
