@@ -67,6 +67,7 @@ exports.getComparison = asyncHandler(async (req, res) => {
     ai_recommended: q.ai_recommended,
     ai_confidence: q.ai_confidence,
     extraction_status: q.extraction_status,
+    extraction_note: q.extraction_note,
     items: q.items,
   }));
   const recommendation = await AiRecommendation.findOne({ where: { rfq_id: rfqId, company_id: req.companyId }, order: [['created_at', 'DESC']] });
