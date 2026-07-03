@@ -84,6 +84,7 @@ router.get('/rfqs', requirePermission('rfq.view'), rfq.list);
 router.post('/rfqs', requirePermission('rfq.create'), rfq.create);
 router.get('/rfqs/:id', requirePermission('rfq.view'), rfq.getOne);
 router.post('/rfqs/:id/send', requirePermission('rfq.send'), rfq.send);
+router.post('/rfqs/:id/vendors', requirePermission('rfq.send'), rfq.addVendors);
 router.post('/rfqs/:id/remind', requirePermission('rfq.send'), rfq.remind);
 router.get('/rfqs/:id/quotes', requirePermission('quotes.view'), rfq.getQuotes);
 router.get('/rfqs/:id/comparison', requirePermission('quotes.view'), quotes.getComparison);
