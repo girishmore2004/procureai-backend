@@ -1,6 +1,6 @@
-const { Quote, QuoteItem, Vendor, AiRecommendation, RfqVendor, AiExtraction } = require('../models');
+const { Quote, QuoteItem, Vendor, AiRecommendation, RfqVendor, PurchaseOrder, PoItem, AiExtraction } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { okResponse, errorResponse } = require('../utils/helpers');
+const { okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 const { generateRecommendation } = require('../services/aiService');
 
@@ -82,20 +82,44 @@ exports.recommend = asyncHandler(async (req, res) => {
 exports.selectVendor = asyncHandler(async (req, res) => {
   const { quote_id, override_reason } = req.body;
   if (!quote_id) return errorResponse(res, 'VALIDATION_ERROR', 'quote_id required');
-  const quote = await Quote.findOne({ where: { id: quote_id, company_id: req.companyId } });
+  const quote = await Quote.findOne({ where: { id: quote_id, company_id: req.companyId }, include: [{ model: QuoteItem, as: 'items' }] });
   if (!quote) return errorResponse(res, 'NOT_FOUND', 'Quote not found', 404);
+
   // Mark all other quotes for this RFQ as rejected
   const rv = await RfqVendor.findByPk(quote.rfq_vendor_id);
   if (rv) {
     const allRv = await RfqVendor.findAll({ where: { rfq_id: rv.rfq_id } });
-    const allQuoteIds = allRv.map((r) => r.id);
-    await Quote.update({ status: 'rejected' }, { where: { rfq_vendor_id: allQuoteIds, company_id: req.companyId } });
+    const allRvIds = allRv.map((r) => r.id);
+    await Quote.update({ status: 'rejected' }, { where: { rfq_vendor_id: allRvIds, company_id: req.companyId } });
   }
   await quote.update({ status: 'selected' });
+
   if (override_reason) {
     const rec = await AiRecommendation.findOne({ where: { rfq_id: rv?.rfq_id, company_id: req.companyId }, order: [['created_at', 'DESC']] });
     if (rec && rec.recommended_quote_id !== quote_id) await rec.update({ overridden_by: req.user.id });
   }
+
+  // Auto-create the draft PO from the selected quote — this is what the "Select Vendor"
+  // screen tells the user will happen, so it needs to actually happen here rather than
+  // requiring a separate manual step nothing in the UI triggers.
+  let po = await PurchaseOrder.findOne({ where: { quote_id: quote.id, company_id: req.companyId } });
+  if (!po) {
+    const po_number = await generateCode(PurchaseOrder, 'PO', 'po_number', req.companyId);
+    po = await PurchaseOrder.create({
+      company_id: req.companyId, rfq_id: rv?.rfq_id, quote_id: quote.id,
+      vendor_id: quote.vendor_id, po_number, status: 'draft',
+      total_amount: quote.total_amount, delivery_location: quote.RfqVendor?.Rfq?.delivery_location || null,
+      created_by: req.user.id,
+    });
+    if (quote.items?.length) {
+      await PoItem.bulkCreate(quote.items.map((qi) => ({
+        purchase_order_id: po.id, item_id: qi.item_id, item_name: qi.item_name_raw,
+        quantity: qi.quantity, unit_price: qi.unit_price, total_price: qi.total_price,
+      })));
+    }
+    await audit({ companyId: req.companyId, userId: req.user.id, action: 'po.created', entityType: 'PurchaseOrder', entityId: po.id, after: { po_number, auto_created_from_quote: quote.id }, ip: req.ip });
+  }
+
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'quote.vendor_selected', entityType: 'Quote', entityId: quote.id, after: { override_reason }, ip: req.ip });
-  okResponse(res, { message: 'Vendor selected', quote_id });
+  okResponse(res, { message: 'Vendor selected', quote_id, purchase_order_id: po.id, po_number: po.po_number });
 });
