@@ -158,10 +158,18 @@ exports.publicSubmitQuote = asyncHandler(async (req, res) => {
     payment_terms, delivery_time_days, validity_date, status: 'submitted',
   });
   await rv.update({ responded_at: new Date(), status: 'responded' });
-  // Enqueue extraction job if file uploaded
+  // Run extraction synchronously (not via background queue) - the app runs on
+  // ephemeral disk storage (Render free tier), so a queued job that reads the
+  // uploaded file later can find it gone if the service redeploys/restarts in
+  // between. Extracting immediately, before responding, removes that race.
   if (file) {
-    const { extractionQueue } = require('../jobs/queues');
-    await extractionQueue.add('extract-quote', { quoteId: quote.id, filePath: file.location || file.path });
+    const { extractQuoteFromFile } = require('../services/aiService');
+    try {
+      await extractQuoteFromFile(quote.id, file.location || file.path);
+    } catch (e) {
+      console.error('[Quote extraction] failed:', e.message);
+      // extractQuoteFromFile already records the failure reason on the quote itself
+    }
   } else if (items?.length) {
     const { QuoteItem } = require('../models');
     await QuoteItem.bulkCreate(items.map((i) => ({ ...i, quote_id: quote.id, confidence_score: 1.0 })));
