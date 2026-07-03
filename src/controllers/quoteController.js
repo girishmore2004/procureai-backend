@@ -1,4 +1,5 @@
 const { Quote, QuoteItem, Vendor, AiRecommendation, RfqVendor, PurchaseOrder, PoItem, AiExtraction } = require('../models');
+const { Op } = require('sequelize');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
@@ -54,7 +55,7 @@ exports.reviewComplete = asyncHandler(async (req, res) => {
 exports.getComparison = asyncHandler(async (req, res) => {
   const rfqId = req.params.id;
   const quotes = await Quote.findAll({
-    where: { company_id: req.companyId },
+    where: { company_id: req.companyId, status: { [Op.ne]: 'superseded' } },
     include: [
       { model: RfqVendor, as: 'RfqVendor', where: { rfq_id: rfqId }, required: true },
       { model: QuoteItem, as: 'items' },
