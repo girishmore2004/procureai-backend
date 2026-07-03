@@ -53,12 +53,16 @@ exports.match = asyncHandler(async (req, res) => {
   if (grn) {
     for (const ii of invoice.items) {
       const poItem = po.items.find((p) => p.id === ii.po_item_id);
-      if (poItem) {
-        const invoiceQty = parseFloat(ii.quantity) || 0;
-        const grni = grn.items?.find((g) => g.po_item_id === poItem.id);
-        const receivedQty = parseFloat(grni?.quantity_received) || 0;
-        if (Math.abs(invoiceQty - receivedQty) > 0.001) mismatches.push(`Qty mismatch for "${ii.item_name_raw}": Invoice ${invoiceQty} vs GRN ${receivedQty}`);
+      if (!poItem) {
+        // AI extraction couldn't confidently link this line to a PO item — flag it
+        // for manual review instead of silently skipping the quantity check.
+        mismatches.push(`"${ii.item_name_raw}" on the invoice could not be matched to a PO line item — please verify manually`);
+        continue;
       }
+      const invoiceQty = parseFloat(ii.quantity) || 0;
+      const grni = grn.items?.find((g) => g.po_item_id === poItem.id);
+      const receivedQty = parseFloat(grni?.quantity_received) || 0;
+      if (Math.abs(invoiceQty - receivedQty) > 0.001) mismatches.push(`Qty mismatch for "${ii.item_name_raw}": Invoice ${invoiceQty} vs GRN ${receivedQty}`);
     }
   }
 
