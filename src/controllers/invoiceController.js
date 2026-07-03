@@ -13,9 +13,14 @@ exports.upload = asyncHandler(async (req, res) => {
     file_url: req.file.location || req.file.path || req.file.originalname,
     match_status: 'pending', payment_status: 'unpaid',
   });
-  // Enqueue extraction
-  const { extractionQueue } = require('../jobs/queues');
-  await extractionQueue.add('extract-invoice', { invoiceId: invoice.id, filePath: req.file.location || req.file.path });
+  // Extract synchronously (not via background queue) - avoids the uploaded file
+  // being wiped by a service redeploy/restart before a queued job gets to read it.
+  try {
+    await extractInvoice(invoice.id, req.file.location || req.file.path);
+    await invoice.reload();
+  } catch (e) {
+    console.error('[Invoice extraction] failed:', e.message);
+  }
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'invoice.uploaded', entityType: 'Invoice', entityId: invoice.id, ip: req.ip });
   okResponse(res, invoice, 201);
 });
