@@ -172,6 +172,7 @@ const Quote = sequelize.define('Quote', {
   source_file_url: DataTypes.STRING,
   source_type: DataTypes.STRING,
   extraction_status: { type: DataTypes.STRING, defaultValue: 'pending' },
+  extraction_note: DataTypes.TEXT,
   payment_terms: DataTypes.STRING,
   delivery_time_days: DataTypes.INTEGER,
   validity_date: DataTypes.DATEONLY,
