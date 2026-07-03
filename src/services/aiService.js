@@ -3,12 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { AiExtraction, AiRecommendation, Quote, QuoteItem, VendorScore, Vendor } = require('../models');
 
-const callLLM = async (prompt) => {
+const callLLM = async (prompt, { maxTokens = 8000 } = {}) => {
   const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
   if (!apiKey) {
     console.warn('LLM_API_KEY not set — returning mock extraction');
-    return JSON.stringify({ items: [], vendor_name: '', payment_terms: '', delivery_time_days: 7, confidence: 0.5 });
+    return { content: JSON.stringify({ items: [], vendor_name: '', payment_terms: '', delivery_time_days: 7, confidence_overall: 0 }), mock: true };
   }
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -16,14 +16,33 @@ const callLLM = async (prompt) => {
     body: JSON.stringify({
       model,
       temperature: 0,
+      max_tokens: maxTokens, // without this a long multi-item quote can get cut off mid-JSON and fail to parse
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
     }),
   });
   if (!res.ok) throw new Error(`LLM API error: ${res.status}`);
   const data = await res.json();
-  return data.choices[0].message.content;
+  const choice = data.choices[0];
+  if (choice.finish_reason === 'length') {
+    console.warn('LLM response was truncated (hit max_tokens) — extraction may be incomplete');
+  }
+  return { content: choice.message.content, mock: false, truncated: choice.finish_reason === 'length' };
 };
+
+// Best-effort recovery for LLM responses that aren't clean JSON (e.g. wrapped in
+// markdown fences, or with stray text before/after). Returns null if unrecoverable.
+function tryParseJson(raw) {
+  try { return JSON.parse(raw); } catch {}
+  const stripped = raw.replace(/```json|```/g, '').trim();
+  try { return JSON.parse(stripped); } catch {}
+  const start = stripped.indexOf('{');
+  const end = stripped.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    try { return JSON.parse(stripped.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
 
 const EXTRACTION_PROMPT = (rawText) => `
 You are a procurement data extraction assistant.
@@ -81,7 +100,12 @@ async function extractTextFromFile(filePath) {
   if (['.xlsx', '.xls'].includes(ext)) {
     const XLSX = require('xlsx');
     const wb = XLSX.readFile(filePath);
-    return wb.SheetNames.map((n) => XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n');
+    return wb.SheetNames.map((n) => {
+      const csv = XLSX.utils.sheet_to_csv(wb.Sheets[n], { blankrows: false });
+      // Drop rows that are just commas (fully empty after blankrows:false still leaves some) so the
+      // LLM isn't misled by gaps between a title block and the actual item table.
+      return `Sheet: ${n}\n` + csv.split('\n').filter((line) => line.replace(/,/g, '').trim().length > 0).join('\n');
+    }).join('\n\n');
   }
   return '';
 }
@@ -92,8 +116,34 @@ async function extractQuoteFromFile(quoteId, filePath) {
   await quote.update({ extraction_status: 'processing' });
   try {
     const rawText = await extractTextFromFile(filePath);
-    const llmResponse = await callLLM(EXTRACTION_PROMPT(rawText));
-    const structured = JSON.parse(llmResponse);
+    if (!rawText || !rawText.trim()) {
+      // Nothing readable came out of the file itself (corrupt/blank/unsupported format) —
+      // there's no point calling the LLM on empty input.
+      await quote.update({ extraction_status: 'needs_review', extraction_note: 'Could not read any text/data from the uploaded file. Please re-upload or enter the quote manually.' });
+      return null;
+    }
+
+    const { content: llmResponse, mock, truncated } = await callLLM(EXTRACTION_PROMPT(rawText));
+    const structured = tryParseJson(llmResponse);
+
+    if (!structured) {
+      // Keep the raw response for debugging instead of losing it - this is the difference
+      // between "silently 0 items" and being able to see exactly what the LLM returned.
+      await AiExtraction.create({
+        company_id: quote.company_id, source_table: 'quote', source_id: quote.id,
+        raw_text: rawText, structured_json: { raw_llm_response: llmResponse },
+        model_used: process.env.LLM_MODEL || 'gpt-4o-mini', confidence_overall: 0,
+      });
+      await quote.update({ extraction_status: 'failed', extraction_note: 'AI response could not be parsed as JSON. Click Re-extract, or enter the quote manually.' });
+      return null;
+    }
+
+    // No LLM_API_KEY configured — make this visible on the quote instead of looking like
+    // a successful extraction that just happened to find zero items.
+    if (mock) {
+      await quote.update({ extraction_status: 'needs_review', extraction_note: 'AI extraction is not configured (LLM_API_KEY missing) — please enter this quote\'s items manually.' });
+      return structured;
+    }
 
     // Store extraction record
     await AiExtraction.create({
@@ -126,7 +176,10 @@ async function extractQuoteFromFile(quoteId, filePath) {
     }
 
     const total = (structured.items || []).reduce((s, i) => s + (i.total_price || 0), 0);
-    const needsReview = (structured.confidence_overall || 0) < 0.75;
+    const needsReview = (structured.confidence_overall || 0) < 0.75 || !structured.items?.length || truncated;
+    let note = null;
+    if (truncated) note = 'AI response was cut off before finishing (too many items for one pass) — some items may be missing. Click Re-extract or add missing rows manually.';
+    else if (!structured.items?.length) note = 'AI could not find any line items in this file. Please check the file or enter items manually.';
 
     await quote.update({
       payment_terms: structured.payment_terms || quote.payment_terms,
@@ -135,11 +188,12 @@ async function extractQuoteFromFile(quoteId, filePath) {
       total_amount: total,
       ai_confidence: structured.confidence_overall,
       extraction_status: needsReview ? 'needs_review' : 'done',
+      extraction_note: note,
     });
 
     return structured;
   } catch (err) {
-    await quote.update({ extraction_status: 'failed' });
+    await quote.update({ extraction_status: 'failed', extraction_note: err.message });
     throw err;
   }
 }
@@ -182,7 +236,7 @@ payment terms "${best.quote.payment_terms}", reliability score ${best.reliabilit
 Compared to ${quotes.length} other quotes. Be specific and concise. No marketing language.
 `;
   let reasoning = '';
-  try { reasoning = await callLLM(reasoningPrompt); } catch { reasoning = `${best.quote.Vendor?.name} offers the best combination of competitive pricing and reliable delivery.`; }
+  try { reasoning = (await callLLM(reasoningPrompt, { maxTokens: 400 })).content; } catch { reasoning = `${best.quote.Vendor?.name} offers the best combination of competitive pricing and reliable delivery.`; }
 
   // Mark recommended
   await Quote.update({ ai_recommended: false }, { where: { company_id: companyId } });
@@ -230,7 +284,11 @@ async function extractInvoice(invoiceId, filePath) {
   if (!invoice) throw new Error('Invoice not found');
   const rawText = await extractTextFromFile(filePath);
   const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, confidence_score}], confidence_overall }. Text:\n${rawText}`;
-  const structured = JSON.parse(await callLLM(prompt));
+  const structured = tryParseJson((await callLLM(prompt)).content);
+  if (!structured) {
+    await invoice.update({ mismatch_reason: 'AI response could not be parsed as JSON — please review this invoice manually.' });
+    throw new Error('AI response could not be parsed as JSON');
+  }
   await AiExtraction.create({ company_id: invoice.company_id, source_table: 'invoice', source_id: invoice.id, raw_text: rawText, structured_json: structured, model_used: process.env.LLM_MODEL || 'gpt-4o-mini', confidence_overall: structured.confidence_overall });
 
   if (structured.items?.length) {
