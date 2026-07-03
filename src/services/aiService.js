@@ -3,31 +3,53 @@ const fs = require('fs');
 const path = require('path');
 const { AiExtraction, AiRecommendation, Quote, QuoteItem, VendorScore, Vendor } = require('../models');
 
-const callLLM = async (prompt, { maxTokens = 8000 } = {}) => {
+const callLLM = async (prompt, { maxTokens = 8000, retries = 2 } = {}) => {
   const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
   if (!apiKey) {
     console.warn('LLM_API_KEY not set — returning mock extraction');
     return { content: JSON.stringify({ items: [], vendor_name: '', payment_terms: '', delivery_time_days: 7, confidence_overall: 0 }), mock: true };
   }
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      max_tokens: maxTokens, // without this a long multi-item quote can get cut off mid-JSON and fail to parse
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-    }),
-  });
-  if (!res.ok) throw new Error(`LLM API error: ${res.status}`);
-  const data = await res.json();
-  const choice = data.choices[0];
-  if (choice.finish_reason === 'length') {
-    console.warn('LLM response was truncated (hit max_tokens) — extraction may be incomplete');
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let res;
+    try {
+      res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          max_tokens: maxTokens, // without this a long multi-item quote can get cut off mid-JSON and fail to parse
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+        }),
+      });
+    } catch (networkErr) {
+      // fetch() itself threw (DNS hiccup, connection reset, timeout) — transient, worth a retry.
+      lastErr = new Error(`LLM API network error: ${networkErr.message}`);
+      if (attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
+      throw lastErr;
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      lastErr = new Error(`LLM API error: ${res.status}${body ? ` — ${body.slice(0, 300)}` : ''}`);
+      // 429 (rate limited) and 5xx (provider having issues) are transient and worth retrying.
+      // Anything else (401 bad key, 400 bad request, etc.) will not succeed on retry.
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
+      throw lastErr;
+    }
+
+    const data = await res.json();
+    const choice = data.choices[0];
+    if (choice.finish_reason === 'length') {
+      console.warn('LLM response was truncated (hit max_tokens) — extraction may be incomplete');
+    }
+    return { content: choice.message.content, mock: false, truncated: choice.finish_reason === 'length' };
   }
-  return { content: choice.message.content, mock: false, truncated: choice.finish_reason === 'length' };
+  throw lastErr;
 };
 
 // Best-effort recovery for LLM responses that aren't clean JSON (e.g. wrapped in
@@ -99,7 +121,15 @@ async function extractTextFromFile(filePath) {
   }
   if (['.xlsx', '.xls'].includes(ext)) {
     const XLSX = require('xlsx');
-    const wb = XLSX.readFile(filePath);
+    let wb;
+    try {
+      wb = XLSX.readFile(filePath);
+    } catch (e) {
+      throw new Error(`Could not read this Excel file — it may be corrupted, password-protected, or not a valid .xlsx/.xls file (${e.message})`);
+    }
+    if (!wb.SheetNames.length) {
+      throw new Error('This Excel file has no sheets to read.');
+    }
     return wb.SheetNames.map((n) => {
       const csv = XLSX.utils.sheet_to_csv(wb.Sheets[n], { blankrows: false });
       // Drop rows that are just commas (fully empty after blankrows:false still leaves some) so the
