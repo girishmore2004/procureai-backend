@@ -16,10 +16,16 @@ exports.getOne = asyncHandler(async (req, res) => {
 exports.reprocess = asyncHandler(async (req, res) => {
   const quote = await Quote.findOne({ where: { id: req.params.id, company_id: req.companyId } });
   if (!quote || !quote.source_file_url) return errorResponse(res, 'INVALID_STATE', 'No source file to reprocess', 400);
-  const { extractionQueue } = require('../jobs/queues');
-  await extractionQueue.add('extract-quote', { quoteId: quote.id, filePath: quote.source_file_url });
-  await quote.update({ extraction_status: 'pending' });
-  okResponse(res, { message: 'Reprocessing queued' });
+  await quote.update({ extraction_status: 'pending', extraction_note: null });
+  const { extractQuoteFromFile } = require('../services/aiService');
+  try {
+    await extractQuoteFromFile(quote.id, quote.source_file_url);
+  } catch (e) {
+    console.error('[Quote reprocess] failed:', e.message);
+    // extractQuoteFromFile already records the failure reason on the quote itself
+  }
+  await quote.reload();
+  okResponse(res, { message: 'Reprocessing complete', extraction_status: quote.extraction_status, extraction_note: quote.extraction_note });
 });
 
 exports.updateItem = asyncHandler(async (req, res) => {
