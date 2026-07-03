@@ -46,16 +46,19 @@ const start = async () => {
   try {
     await sequelize.authenticate();
     console.log('✅ Database connected');
-    // In dev, sync gently. In prod, use explicit migrations.
-    if (process.env.NODE_ENV !== 'production') {
-      await sequelize.sync({ alter: true });
-      console.log('✅ Models synced');
-    }
+
+    // Render's free tier has no Shell access to run `npm run migrate` manually,
+    // so schema changes must apply themselves on every boot. alter:true only
+    // adds/modifies columns to match the models — it does not drop data.
+    await sequelize.sync({ alter: true });
+    console.log('✅ Models synced');
+
     // Start background job workers (BullMQ)
     require('./jobs/queues');
     // Start scheduled cron jobs (reorder alerts, vendor scoring, RFQ reminders)
     const { startCronJobs } = require('./jobs/cron');
     startCronJobs();
+
     app.listen(PORT, () => console.log(`🚀 ProcureAI API running on port ${PORT}`));
   } catch (err) {
     console.error('❌ Startup failed:', err);
