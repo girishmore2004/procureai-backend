@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const { Op } = require('sequelize');
 const { Rfq, RfqVendor, Vendor, PurchaseRequest, PurchaseRequestItem, Quote } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
@@ -10,7 +11,7 @@ exports.list = asyncHandler(async (req, res) => {
   const { page, perPage, limit, offset } = paginate(req.query);
   const where = { company_id: req.companyId };
   if (req.query.status) where.status = req.query.status;
-  const result = await Rfq.findAndCountAll({ where, limit, offset, include: [{ model: RfqVendor, as: 'rfqVendors', include: [Vendor] }], order: [['created_at', 'DESC']] });
+  const result = await Rfq.findAndCountAll({ where, limit, offset, include: [{ model: RfqVendor, as: 'rfqVendors', include: [Vendor, { model: Quote, separate: true, where: { status: { [Op.ne]: 'superseded' } }, required: false, order: [['created_at', 'DESC']] }] }], order: [['created_at', 'DESC']] });
   paginatedResponse(res, result, { page, perPage });
 });
 
@@ -33,7 +34,7 @@ exports.create = asyncHandler(async (req, res) => {
 exports.getOne = asyncHandler(async (req, res) => {
   const rfq = await Rfq.findOne({
     where: { id: req.params.id, company_id: req.companyId },
-    include: [{ model: RfqVendor, as: 'rfqVendors', include: [Vendor, Quote] }, { model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items' }] }],
+    include: [{ model: RfqVendor, as: 'rfqVendors', include: [Vendor, { model: Quote, separate: true, order: [['created_at', 'DESC']] }] }, { model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items' }] }],
   });
   if (!rfq) return errorResponse(res, 'NOT_FOUND', 'RFQ not found', 404);
   okResponse(res, rfq);
@@ -117,7 +118,7 @@ exports.getQuotes = asyncHandler(async (req, res) => {
   const { QuoteItem } = require('../models');
   const rfq = await Rfq.findOne({ where: { id: req.params.id, company_id: req.companyId } });
   if (!rfq) return errorResponse(res, 'NOT_FOUND', 'RFQ not found', 404);
-  const quotes = await Quote.findAll({ where: { company_id: req.companyId }, include: [{ model: RfqVendor, where: { rfq_id: rfq.id } }, { model: QuoteItem, as: 'items' }, Vendor] });
+  const quotes = await Quote.findAll({ where: { company_id: req.companyId, status: { [Op.ne]: 'superseded' } }, include: [{ model: RfqVendor, where: { rfq_id: rfq.id } }, { model: QuoteItem, as: 'items' }, Vendor] });
   okResponse(res, quotes);
 });
 
@@ -149,6 +150,14 @@ exports.publicSubmitQuote = asyncHandler(async (req, res) => {
       return errorResponse(res, 'VALIDATION_ERROR', 'Invalid items format', 422);
     }
   }
+
+  // If this vendor already has an active quote on this RFQ (e.g. they/we submitted by
+  // mistake, or they're sending a corrected quote), supersede it instead of leaving both
+  // around — otherwise the vendor shows up twice in the comparison table and AI recommendation.
+  await Quote.update(
+    { status: 'superseded' },
+    { where: { rfq_vendor_id: rv.id, status: 'submitted' } }
+  );
 
   const quote = await Quote.create({
     rfq_vendor_id: rv.id, vendor_id: rv.vendor_id, company_id: rv.Rfq?.company_id,
