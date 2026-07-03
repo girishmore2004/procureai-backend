@@ -201,16 +201,57 @@ Compared to ${quotes.length} other quotes. Be specific and concise. No marketing
   return rec;
 }
 
+// Normalize an item name for fuzzy matching: lowercase, strip punctuation/units noise, collapse whitespace.
+function normalizeItemName(name) {
+  return (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Best-effort link between an AI-extracted invoice line and the PO's line items.
+// Exact normalized match first, then containment either direction, else null (unmatched).
+function matchPoItem(rawName, poItems) {
+  const target = normalizeItemName(rawName);
+  if (!target) return null;
+  let best = null;
+  for (const poItem of poItems) {
+    const candidate = normalizeItemName(poItem.item_name);
+    if (!candidate) continue;
+    if (candidate === target) return poItem; // exact match — stop immediately
+    if (!best && (candidate.includes(target) || target.includes(candidate))) best = poItem;
+  }
+  return best;
+}
+
 async function extractInvoice(invoiceId, filePath) {
-  const { Invoice, InvoiceItem } = require('../models');
+  const { Invoice, InvoiceItem, PoItem } = require('../models');
   const invoice = await Invoice.findByPk(invoiceId);
   if (!invoice) throw new Error('Invoice not found');
   const rawText = await extractTextFromFile(filePath);
   const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, confidence_score}], confidence_overall }. Text:\n${rawText}`;
   const structured = JSON.parse(await callLLM(prompt));
   await AiExtraction.create({ company_id: invoice.company_id, source_table: 'invoice', source_id: invoice.id, raw_text: rawText, structured_json: structured, model_used: process.env.LLM_MODEL || 'gpt-4o-mini', confidence_overall: structured.confidence_overall });
+
   if (structured.items?.length) {
-    await InvoiceItem.bulkCreate(structured.items.map((i) => ({ invoice_id: invoice.id, item_name_raw: i.item_name_raw, quantity: i.quantity, unit_price: i.unit_price, total_price: i.total_price, confidence_score: i.confidence_score })));
+    // Pull the PO's line items (if this invoice is linked to a PO) so we can attach
+    // po_item_id to each extracted line — required for 3-way quantity matching to work at all.
+    const poItems = invoice.purchase_order_id
+      ? await PoItem.findAll({ where: { purchase_order_id: invoice.purchase_order_id } })
+      : [];
+
+    await InvoiceItem.bulkCreate(structured.items.map((i) => {
+      const matched = poItems.length ? matchPoItem(i.item_name_raw, poItems) : null;
+      return {
+        invoice_id: invoice.id,
+        po_item_id: matched ? matched.id : null,
+        item_name_raw: i.item_name_raw,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+        total_price: i.total_price,
+        confidence_score: i.confidence_score,
+      };
+    }));
   }
   await invoice.update({ invoice_number: structured.invoice_number || invoice.invoice_number, invoice_date: structured.invoice_date || invoice.invoice_date, total_amount: structured.total_amount || invoice.total_amount });
   return structured;
