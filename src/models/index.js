@@ -411,6 +411,17 @@ Quote.belongsTo(Vendor, { foreignKey: 'vendor_id' });
 Quote.hasMany(QuoteItem, { foreignKey: 'quote_id', as: 'items' });
 QuoteItem.belongsTo(Quote, { foreignKey: 'quote_id' });
 
+// AiExtraction is polymorphic (source_table + source_id instead of a real FK), so these
+// associations use constraints:false + a scope on source_table, the same pattern already
+// used for Approval above. Without this, quoteController.getOne's `include: [{ model:
+// AiExtraction, ... }]` throws "AiExtraction is not associated to Quote!" (Sequelize
+// requires an association to exist for any include), which 500s GET /quotes/:id and makes
+// the Quote Detail / "View Quote" page render as empty/not-found on the frontend.
+Quote.hasMany(AiExtraction, { foreignKey: 'source_id', constraints: false, scope: { source_table: 'quote' } });
+AiExtraction.belongsTo(Quote, { foreignKey: 'source_id', constraints: false });
+Invoice.hasMany(AiExtraction, { foreignKey: 'source_id', constraints: false, scope: { source_table: 'invoice' } });
+AiExtraction.belongsTo(Invoice, { foreignKey: 'source_id', constraints: false });
+
 PurchaseOrder.hasMany(PoItem, { foreignKey: 'purchase_order_id', as: 'items' });
 PoItem.belongsTo(PurchaseOrder, { foreignKey: 'purchase_order_id' });
 PurchaseOrder.belongsTo(Vendor, { foreignKey: 'vendor_id' });
