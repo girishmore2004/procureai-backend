@@ -368,4 +368,4 @@ async function extractInvoice(invoiceId, filePath) {
   return structured;
 }
 
-module.exports = { extractQuoteFromFile, generateRecommendation, extractInvoice };
+module.exports = { extractQuoteFromFile, validateQuoteFile, generateRecommendation, extractInvoice };
