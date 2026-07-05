@@ -2,7 +2,7 @@ const { Op } = require('sequelize');
 const XLSX = require('xlsx');
 const { Item, Vendor, Inventory, ReorderRule } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
+const { paginate, paginatedResponse, okResponse, errorResponse, generateCode, normalizeImportRow } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 
 exports.list = asyncHandler(async (req, res) => {
@@ -43,18 +43,30 @@ exports.create = asyncHandler(async (req, res) => {
 exports.importCsv = asyncHandler(async (req, res) => {
   if (!req.file) return errorResponse(res, 'VALIDATION_ERROR', 'File required');
   const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-  const results = { created: 0, errors: [] };
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row.name) { results.errors.push({ row: i + 2, message: 'name required' }); continue; }
+  const rawRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+  if (!rawRows.length) return errorResponse(res, 'VALIDATION_ERROR', 'The sheet has no data rows (check that row 1 has headers and row 2+ has data)');
+
+  const results = { created: 0, total: rawRows.length, errors: [] };
+  for (let i = 0; i < rawRows.length; i++) {
+    // Headers like "Item Name" / "HSN Code" / "Reorder Point" etc. are matched
+    // to our fields automatically — see normalizeImportRow in utils/helpers.js
+    const row = normalizeImportRow(rawRows[i]);
+    if (!row.name) {
+      results.errors.push({ row: i + 2, message: `name is required (columns found: ${Object.keys(rawRows[i]).join(', ')})` });
+      continue;
+    }
     try {
       const item_code = await generateCode(Item, 'ITM', 'item_code', req.companyId);
-      const item = await Item.create({ company_id: req.companyId, item_code, name: row.name, category: row.category, unit: row.unit, hsn_sac: row.hsn_sac, tax_rate: row.tax_rate, reorder_level: row.reorder_level });
-      await Inventory.findOrCreate({ where: { item_id: item.id, company_id: req.companyId }, defaults: { current_stock: row.opening_stock || 0 } });
+      const item = await Item.create({
+        company_id: req.companyId, item_code, name: row.name, category: row.category, unit: row.unit,
+        hsn_sac: row.hsn_sac, tax_rate: row.tax_rate ? Number(row.tax_rate) : null,
+        reorder_level: row.reorder_level ? Number(row.reorder_level) : null,
+      });
+      await Inventory.findOrCreate({ where: { item_id: item.id, company_id: req.companyId }, defaults: { current_stock: row.opening_stock ? Number(row.opening_stock) : 0 } });
       results.created++;
     } catch (e) { results.errors.push({ row: i + 2, message: e.message }); }
   }
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'item.imported', entityType: 'Item', entityId: null, after: { created: results.created, total: results.total }, ip: req.ip });
   okResponse(res, results);
 });
 
