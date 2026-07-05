@@ -73,6 +73,25 @@ exports.sendPoEmail = async ({ vendor, po, pdfPath }) => {
   });
 };
 
+// ADD this function to notificationService.js:
+exports.sendVendorInviteEmail = async ({ vendor, tempPassword, portalUrl }) => {
+  return sendMail({
+    to: vendor.email,
+    subject: 'You have been added as a vendor on ProcureAI',
+    html: `
+      <h2>Welcome to ProcureAI Vendor Portal</h2>
+      <p>Dear ${vendor.contact_person || vendor.name},</p>
+      <p>You have been added as a vendor. You can now log in to manage your profile and product catalog.</p>
+      <p><strong>Login URL:</strong> <a href="${portalUrl}">${portalUrl}</a></p>
+      <p><strong>Email:</strong> ${vendor.email}</p>
+      <p><strong>Temporary Password:</strong> <code>${tempPassword}</code></p>
+      <p>Please log in and change your password on first use.</p>
+      <p style="color:#666;font-size:12px">This invite was sent by your buyer. Do not share your credentials.</p>
+    `,
+  });
+};
+
+
 // Sent when a new user account is created, so they actually receive their
 // login credentials instead of the password only existing in the database.
 exports.sendUserInviteEmail = async ({ user, tempPassword, loginUrl }) => {
