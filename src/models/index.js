@@ -411,6 +411,8 @@ Vendor.hasMany(VendorDocument, { foreignKey: 'vendor_id' });
 Vendor.hasMany(PurchaseOrder, { foreignKey: 'vendor_id' });
 Vendor.hasMany(VendorScore, { foreignKey: 'vendor_id' });
 
+Vendor.hasMany(VendorCatalogItem, { foreignKey: 'vendor_id', as: 'catalogItems' });
+VendorCatalogItem.belongsTo(Vendor, { foreignKey: 'vendor_id' });
 
 PurchaseRequest.hasMany(PurchaseRequestItem, { foreignKey: 'purchase_request_id', as: 'items' });
 PurchaseRequestItem.belongsTo(PurchaseRequest, { foreignKey: 'purchase_request_id' });
@@ -480,5 +482,5 @@ module.exports = {
   GoodsReceipt, GoodsReceiptItem,
   Invoice, InvoiceItem,
   VendorScore, Inventory, ReorderRule,
-  Notification, Attachment, AuditLog, Setting,
+  Notification, Attachment, AuditLog, Setting,VendorCatalogItem,
 };
