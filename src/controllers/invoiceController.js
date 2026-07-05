@@ -8,6 +8,19 @@ exports.upload = asyncHandler(async (req, res) => {
   const { purchase_order_id, vendor_id } = req.body;
   if (!req.file) return errorResponse(res, 'VALIDATION_ERROR', 'Invoice file required');
   if (!vendor_id) return errorResponse(res, 'VALIDATION_ERROR', 'vendor_id required');
+
+  // Both purchase_order_id and vendor_id come from the client — without this
+  // check, a user could attach their invoice to another company's PO/vendor
+  // record, and every subsequent invoice.getOne()/match() call would then
+  // expose that other company's PO totals, items, and vendor details.
+  const { Vendor } = require('../models');
+  const vendor = await Vendor.findOne({ where: { id: vendor_id, company_id: req.companyId } });
+  if (!vendor) return errorResponse(res, 'NOT_FOUND', 'Vendor not found', 404);
+  if (purchase_order_id) {
+    const po = await PurchaseOrder.findOne({ where: { id: purchase_order_id, company_id: req.companyId } });
+    if (!po) return errorResponse(res, 'NOT_FOUND', 'Purchase order not found', 404);
+  }
+
   const invoice = await Invoice.create({
     company_id: req.companyId, purchase_order_id, vendor_id,
     file_url: req.file.location || req.file.path || req.file.originalname,
@@ -44,7 +57,8 @@ exports.match = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findOne({ where: { id: req.params.id, company_id: req.companyId }, include: [{ model: InvoiceItem, as: 'items' }] });
   if (!invoice) return errorResponse(res, 'NOT_FOUND', 'Invoice not found', 404);
   if (!invoice.purchase_order_id) { await invoice.update({ match_status: 'mismatched', mismatch_reason: 'No PO linked' }); return okResponse(res, { match_status: 'mismatched', mismatches: ['No PO linked'] }); }
-  const po = await PurchaseOrder.findByPk(invoice.purchase_order_id, { include: [{ model: PoItem, as: 'items' }] });
+  const po = await PurchaseOrder.findOne({ where: { id: invoice.purchase_order_id, company_id: req.companyId }, include: [{ model: PoItem, as: 'items' }] });
+  if (!po) { await invoice.update({ match_status: 'mismatched', mismatch_reason: 'Linked PO not found' }); return okResponse(res, { match_status: 'mismatched', mismatches: ['Linked PO not found'] }); }
   const grn = await GoodsReceipt.findOne({ where: { purchase_order_id: po.id }, include: [{ model: GoodsReceiptItem, as: 'items' }] });
 
   const mismatches = [];
@@ -88,6 +102,10 @@ exports.approve = asyncHandler(async (req, res) => {
 });
 
 exports.updateItem = asyncHandler(async (req, res) => {
+  // Previously this only checked invoice_id, not company_id — any authenticated
+  // user could edit another company's invoice line items by guessing the IDs.
+  const invoice = await Invoice.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!invoice) return errorResponse(res, 'NOT_FOUND', 'Invoice not found', 404);
   const item = await InvoiceItem.findOne({ where: { id: req.params.item_id, invoice_id: req.params.id } });
   if (!item) return errorResponse(res, 'NOT_FOUND', 'Invoice item not found', 404);
   ['item_name_raw', 'quantity', 'unit_price', 'total_price'].forEach((f) => { if (req.body[f] !== undefined) item[f] = req.body[f]; });
