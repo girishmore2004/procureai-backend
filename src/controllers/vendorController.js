@@ -23,6 +23,23 @@ exports.create = asyncHandler(async (req, res) => {
   const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
   const vendor = await Vendor.create({ company_id: req.companyId, name, email, phone, whatsapp_number, contact_person, address, gstin, legal_name, categories, payment_terms, lead_time_days, moq, preferred, notes, vendor_code });
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'vendor.created', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
+  okResponse(res, vendor, 201); 
+  // ADD after vendor is created (after Vendor.create):
+  const { generateTempPassword } = require('../utils/helpers');
+  const bcrypt = require('bcryptjs');
+
+// Set temp password for vendor portal
+  const tempPassword = generateTempPassword();
+  const hash = await bcrypt.hash(tempPassword, 10);
+  await vendor.update({ password_hash: hash, portal_status: 'invited', portal_invited_at: new Date() });
+
+// Send invite email
+  const { sendVendorInviteEmail } = require('../services/notificationService');
+  const portalUrl = `${process.env.APP_URL || process.env.FRONTEND_URL}/vendor-portal/login`;
+  await sendVendorInviteEmail({ vendor, tempPassword, portalUrl }).catch((e) =>
+  console.warn('[Vendor Invite Email] failed:', e.message)
+);
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'vendor.created', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
   okResponse(res, vendor, 201);
 });
 
