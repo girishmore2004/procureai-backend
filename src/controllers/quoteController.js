@@ -44,6 +44,11 @@ exports.reprocess = asyncHandler(async (req, res) => {
 });
 
 exports.updateItem = asyncHandler(async (req, res) => {
+  // Previously this only checked quote_id, not company_id — any authenticated
+  // user could edit another company's quote line items (pricing data) by
+  // guessing the IDs. This also underpinned deleteItem below.
+  const quote = await Quote.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!quote) return errorResponse(res, 'NOT_FOUND', 'Quote not found', 404);
   const item = await QuoteItem.findOne({ where: { id: req.params.item_id, quote_id: req.params.id } });
   if (!item) return errorResponse(res, 'NOT_FOUND', 'Quote item not found', 404);
   const allowed = ['item_name_raw', 'quantity', 'unit_price', 'total_price', 'tax', 'freight', 'discount', 'warranty', 'availability', 'notes'];
@@ -52,7 +57,7 @@ exports.updateItem = asyncHandler(async (req, res) => {
   await item.save();
   const items = await QuoteItem.findAll({ where: { quote_id: req.params.id } });
   const total = items.reduce((s, i) => s + parseFloat(i.total_price || 0), 0);
-  await Quote.update({ total_amount: total }, { where: { id: req.params.id } });
+  await Quote.update({ total_amount: total }, { where: { id: req.params.id, company_id: req.companyId } });
   okResponse(res, item);
 });
 
@@ -78,12 +83,14 @@ exports.addItem = asyncHandler(async (req, res) => {
 });
 
 exports.deleteItem = asyncHandler(async (req, res) => {
+  const quote = await Quote.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!quote) return errorResponse(res, 'NOT_FOUND', 'Quote not found', 404);
   const item = await QuoteItem.findOne({ where: { id: req.params.item_id, quote_id: req.params.id } });
   if (!item) return errorResponse(res, 'NOT_FOUND', 'Quote item not found', 404);
   await item.destroy();
   const allItems = await QuoteItem.findAll({ where: { quote_id: req.params.id } });
   const total = allItems.reduce((s, i) => s + parseFloat(i.total_price || 0), 0);
-  await Quote.update({ total_amount: total }, { where: { id: req.params.id } });
+  await Quote.update({ total_amount: total }, { where: { id: req.params.id, company_id: req.companyId } });
   okResponse(res, { message: 'Item deleted' });
 });
 
