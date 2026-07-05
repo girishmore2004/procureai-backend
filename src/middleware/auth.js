@@ -31,4 +31,13 @@ const requirePermission = (...codes) => (req, res, next) => {
   next();
 };
 
-module.exports = { verifyToken, requirePermission };
+const requireAnyPermission = (...codes) => (req, res, next) => {
+  const userPerms = req.user?.Role?.Permissions?.map((p) => p.code) || [];
+  const hasAny = codes.some((c) => userPerms.includes(c));
+  if (!hasAny) {
+    return res.status(403).json({ error: { code: 'FORBIDDEN', message: `Missing permission: one of ${codes.join(', ')}` } });
+  }
+  next();
+};
+
+module.exports = { verifyToken, requirePermission, requireAnyPermission };
