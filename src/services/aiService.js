@@ -122,53 +122,75 @@ async function loadFileBuffer(filePathOrUrl) {
   }
 }
 
-async function extractTextFromFile(filePathOrUrl) {
-  const ext = path.extname(filePathOrUrl.split('?')[0]).toLowerCase();
-  const buffer = await loadFileBuffer(filePathOrUrl);
-  // For PDFs, Tesseract can handle image-based PDFs; for pure-text PDFs use pdfkit or pdf-parse
-  if (['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.gif'].includes(ext)) {
+// Reads text from a Buffer — never touches disk, works for all file types
+async function extractTextFromBuffer(buffer, mimetype, originalname) {
+  const ext = path.extname(originalname || '').toLowerCase();
+
+  if (['image/jpeg', 'image/jpg', 'image/png', 'image/tiff', 'image/bmp', 'image/gif'].includes(mimetype) ||
+      ['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.gif'].includes(ext)) {
     const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
     return text;
   }
-  if (ext === '.pdf') {
-    // Try Tesseract on PDF (works for image PDFs)
+
+  if (mimetype === 'application/pdf' || ext === '.pdf') {
     try {
       const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
-      return text;
-    } catch (e) {
+      if (text && text.trim().length > 20) return text;
+      return buffer.toString('utf8');
+    } catch {
       return buffer.toString('utf8');
     }
   }
-  if (['.txt', '.csv'].includes(ext)) {
-    return buffer.toString('utf8');
-  }
-  if (['.xlsx', '.xls'].includes(ext)) {
+
+  if (['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+       'application/vnd.ms-excel'].includes(mimetype) ||
+      ['.xlsx', '.xls'].includes(ext)) {
     const XLSX = require('xlsx');
     let wb;
     try {
-      wb = XLSX.read(buffer, { type: 'buffer' });
+      wb = XLSX.read(buffer, { type: 'buffer' }); // reads from buffer, no disk path
     } catch (e) {
-      throw new Error(`Could not read this Excel file — it may be corrupted, password-protected, or not a valid .xlsx/.xls file (${e.message})`);
+      throw new Error(`Could not read Excel file — may be corrupted or password-protected (${e.message})`);
     }
-    if (!wb.SheetNames.length) {
-      throw new Error('This Excel file has no sheets to read.');
-    }
+    if (!wb.SheetNames.length) throw new Error('Excel file has no sheets.');
     return wb.SheetNames.map((n) => {
       const csv = XLSX.utils.sheet_to_csv(wb.Sheets[n], { blankrows: false });
-      // Drop rows that are just commas (fully empty after blankrows:false still leaves some) so the
-      // LLM isn't misled by gaps between a title block and the actual item table.
-      return `Sheet: ${n}\n` + csv.split('\n').filter((line) => line.replace(/,/g, '').trim().length > 0).join('\n');
+      return `Sheet: ${n}\n` +
+        csv.split('\n').filter((l) => l.replace(/,/g, '').trim().length > 0).join('\n');
     }).join('\n\n');
   }
-  return '';
+
+  if (['text/csv', 'text/plain'].includes(mimetype) || ['.csv', '.txt'].includes(ext)) {
+    return buffer.toString('utf8');
+  }
+
+  const fallback = buffer.toString('utf8');
+  if (fallback.trim().length > 5) return fallback;
+  throw new Error('Cannot extract text from this file type. Upload PDF, image, Excel, or CSV.');
 }
 
-async function extractQuoteFromFile(quoteId, filePath) {
+async function extractQuoteFromFile(quoteId, fileSource, mimetypeHint, originalNameHint) {
   const quote = await Quote.findByPk(quoteId);
   if (!quote) throw new Error('Quote not found');
   await quote.update({ extraction_status: 'processing' });
   try {
-    const rawText = await extractTextFromFile(filePath);
+    let buffer;
+    let mimetype = mimetypeHint || '';
+    let originalname = originalNameHint || quote.source_file_url || 'file';
+    if (Buffer.isBuffer(fileSource)) {
+      buffer = fileSource;
+    } else {
+      // Fallback for re-extract from old URL/path
+      buffer = await loadFileBuffer(fileSource);
+      if (!mimetype) {
+        const ext = path.extname((fileSource || '').split('?')[0]).toLowerCase();
+        const m = { '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+          '.png': 'image/png', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          '.xls': 'application/vnd.ms-excel', '.csv': 'text/csv' };
+        mimetype = m[ext] || '';
+      }
+    }
+    const rawText = await extractTextFromBuffer(buffer, mimetype, originalname);
     if (!rawText || !rawText.trim()) {
       // Nothing readable came out of the file itself (corrupt/blank/unsupported format) —
       // there's no point calling the LLM on empty input.
@@ -368,4 +390,40 @@ async function extractInvoice(invoiceId, filePath) {
   return structured;
 }
 
+// Pre-validation: extract from buffer WITHOUT writing to DB.
+// Vendor uploads file → we extract → return items for frontend preview → vendor confirms → submit.
+async function validateQuoteFile(buffer, mimetype, originalname) {
+  const rawText = await extractTextFromBuffer(buffer, mimetype, originalname);
+  if (!rawText || rawText.trim().length < 10) {
+    throw new Error('Could not read any text from this file. Try a clearer scan or enter manually.');
+  }
+  const { content, mock, truncated } = await callLLM(
+    EXTRACTION_PROMPT(rawText), { maxTokens: 8000 }
+  );
+  const structured = tryParseJson(content);
+  if (!structured) throw new Error('AI could not parse the file contents. Please enter your quote manually.');
+  return {
+    success: true,
+    vendor_name: structured.vendor_name || null,
+    payment_terms: structured.payment_terms || null,
+    delivery_time_days: structured.delivery_time_days || null,
+    validity_date: structured.validity_date || null,
+    confidence_overall: structured.confidence_overall || 0,
+    items: (structured.items || []).map((i) => ({
+      item_name_raw: i.item_name_raw || '',
+      item_code_raw: i.item_code_raw || '',
+      quantity: i.quantity || 0,
+      unit_price: i.unit_price || 0,
+      total_price: i.total_price || ((i.quantity || 0) * (i.unit_price || 0)),
+      tax: i.tax || 0,
+      freight: i.freight || 0,
+      discount: i.discount || 0,
+      warranty: i.warranty || '',
+      confidence_score: i.confidence_score || 0.5,
+    })),
+    notes: structured.notes || null,
+    mock,
+    truncated,
+  };
+}
 module.exports = { extractQuoteFromFile, validateQuoteFile, generateRecommendation, extractInvoice };
