@@ -2,8 +2,9 @@ const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const { User, Role, Permission } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { paginate, paginatedResponse, okResponse, errorResponse } = require('../utils/helpers');
+const { paginate, paginatedResponse, okResponse, errorResponse, generateTempPassword } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
+const notificationService = require('../services/notificationService');
 
 exports.list = asyncHandler(async (req, res) => {
   const { page, perPage, limit, offset } = paginate(req.query);
@@ -23,14 +24,27 @@ exports.create = asyncHandler(async (req, res) => {
   const role = await Role.findOne({ where: { id: role_id, company_id: req.companyId } });
   if (!role) return errorResponse(res, 'NOT_FOUND', 'Role not found', 404);
 
-  const hash = await bcrypt.hash(password || 'Temp@1234', 10);
+  // A random temp password is generated per-user (not derived from their email —
+  // that was never actually implemented, only implied). It's emailed to them below;
+  // if email isn't configured, it's returned in the response so an admin can share it.
+  const tempPassword = password || generateTempPassword();
+  const hash = await bcrypt.hash(tempPassword, 10);
   const user = await User.create({
     company_id: req.companyId, name, email: email.toLowerCase(), role_id, department, branch,
     phone, whatsapp_number, reporting_manager_id, password_hash: hash, status: 'active',
   });
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'user.created', entityType: 'User', entityId: user.id, after: { name, email, role_id }, ip: req.ip });
-  // TODO: send invite email with temp password
-  okResponse(res, user, 201);
+
+  const loginUrl = process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/login` : 'https://procureai-frontend-two.vercel.app/login';
+  const emailResult = await notificationService.sendUserInviteEmail({ user, tempPassword, loginUrl });
+
+  okResponse(res, {
+    ...user.toJSON(),
+    // Only surfaced to the admin creating the account, and only when email
+    // didn't actually go out, so the credential isn't lost.
+    temp_password: emailResult.sent ? undefined : tempPassword,
+    invite_email_sent: emailResult.sent,
+  }, 201);
 });
 
 exports.getOne = asyncHandler(async (req, res) => {
