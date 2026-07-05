@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { User, Role, Permission } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { okResponse, errorResponse } = require('../utils/helpers');
+const notificationService = require('../services/notificationService');
 
 const signAccess = (userId) =>
   jwt.sign({ userId }, process.env.JWT_ACCESS_SECRET, { expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m' });
@@ -64,9 +65,11 @@ exports.forgotPassword = asyncHandler(async (req, res) => {
   const user = await User.findOne({ where: { email: email?.toLowerCase() } });
   // Always return OK to prevent email enumeration
   if (user) {
-    const token = signAccess(user.id); // reuse for simplicity — in prod, store in DB with expiry
-    // TODO: send email with reset link: /reset-password?token=...
-    console.log(`Password reset token for ${email}: ${token}`);
+    const token = jwt.sign({ userId: user.id }, process.env.JWT_ACCESS_SECRET, { expiresIn: '15m' });
+    const frontendUrl = process.env.FRONTEND_URL || 'https://procureai-frontend-two.vercel.app';
+    const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
+    const result = await notificationService.sendPasswordResetEmail({ user, resetUrl });
+    if (!result.sent) console.warn(`Password reset email not sent for ${email} (${result.reason}). Reset URL: ${resetUrl}`);
   }
   okResponse(res, { message: 'If that email exists, a reset link has been sent' });
 });
