@@ -2,7 +2,7 @@ const { Op } = require('sequelize');
 const XLSX = require('xlsx');
 const { Vendor, VendorDocument, VendorScore, PurchaseOrder } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
+const { paginate, paginatedResponse, okResponse, errorResponse, generateCode, normalizeImportRow } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 const sequelize = require('../config/db');
 
@@ -29,17 +29,32 @@ exports.create = asyncHandler(async (req, res) => {
 exports.importCsv = asyncHandler(async (req, res) => {
   if (!req.file) return errorResponse(res, 'VALIDATION_ERROR', 'CSV/Excel file required');
   const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-  const results = { created: 0, errors: [] };
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row.name) { results.errors.push({ row: i + 2, message: 'name is required' }); continue; }
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+  if (!rawRows.length) return errorResponse(res, 'VALIDATION_ERROR', 'The sheet has no data rows (check that row 1 has headers and row 2+ has data)');
+
+  const results = { created: 0, total: rawRows.length, errors: [] };
+  for (let i = 0; i < rawRows.length; i++) {
+    // Headers like "Vendor Name" / "GST No" / "Mobile" etc. are matched to our
+    // fields automatically — see normalizeImportRow in utils/helpers.js
+    const row = normalizeImportRow(rawRows[i]);
+    if (!row.name) {
+      results.errors.push({ row: i + 2, message: `name is required (columns found: ${Object.keys(rawRows[i]).join(', ')})` });
+      continue;
+    }
     try {
       const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
-      await Vendor.create({ company_id: req.companyId, name: row.name, email: row.email, phone: row.phone, gstin: row.gstin, payment_terms: row.payment_terms, lead_time_days: row.lead_time_days, vendor_code });
+      await Vendor.create({
+        company_id: req.companyId, name: row.name, email: row.email, phone: row.phone,
+        whatsapp_number: row.whatsapp_number, contact_person: row.contact_person,
+        gstin: row.gstin, payment_terms: row.payment_terms,
+        lead_time_days: row.lead_time_days ? Number(row.lead_time_days) : null,
+        vendor_code,
+      });
       results.created++;
     } catch (e) { results.errors.push({ row: i + 2, message: e.message }); }
   }
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'vendor.imported', entityType: 'Vendor', entityId: null, after: { created: results.created, total: results.total }, ip: req.ip });
   okResponse(res, results);
 });
 
