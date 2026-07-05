@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { verifyToken, requirePermission } = require('../middleware/auth');
+const { verifyToken, requirePermission, requireAnyPermission } = require('../middleware/auth');
 const { upload, csvUpload } = require('../middleware/upload');
 
 const auth = require('../controllers/authController');
@@ -94,12 +94,15 @@ router.post('/rfqs/:id/select-vendor', requirePermission('quotes.review'), quote
 // ── QUOTES ────────────────────────────────────────────────────────────
 router.get('/quotes/:id', requirePermission('quotes.view'), quotes.getOne);
 router.post('/quotes/:id/reprocess', requirePermission('quotes.review'), quotes.reprocess);
+router.post('/quotes/:id/items', requirePermission('quotes.review'), quotes.addItem);
 router.patch('/quotes/:id/items/:item_id', requirePermission('quotes.review'), quotes.updateItem);
+router.delete('/quotes/:id/items/:item_id', requirePermission('quotes.review'), quotes.deleteItem);
 router.post('/quotes/:id/review-complete', requirePermission('quotes.review'), quotes.reviewComplete);
 
 // ── APPROVALS ─────────────────────────────────────────────────────────
-router.get('/approvals/pending', approvals.getPending);
-router.post('/approvals/:id/act', approvals.act);
+const APPROVE_PERMS = ['pr.approve', 'po.approve', 'invoices.approve'];
+router.get('/approvals/pending', requireAnyPermission(...APPROVE_PERMS), approvals.getPending);
+router.post('/approvals/:id/act', requireAnyPermission(...APPROVE_PERMS), approvals.act);
 router.get('/approvals/:type/:entityId/history', approvals.getHistory);
 
 // ── PURCHASE ORDERS ───────────────────────────────────────────────────
