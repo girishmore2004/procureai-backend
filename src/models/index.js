@@ -52,6 +52,9 @@ const User = sequelize.define('User', {
   branch: DataTypes.STRING,
   reporting_manager_id: DataTypes.UUID,
   password_hash: DataTypes.STRING,
+  // In the Vendor model definition, add after password_hash:
+  portal_status: { type: DataTypes.STRING, defaultValue: 'invited' }, // invited|active|disabled
+  portal_invited_at: DataTypes.DATE,
   mfa_enabled: { type: DataTypes.BOOLEAN, defaultValue: false },
   status: { type: DataTypes.STRING, defaultValue: 'active' },
   last_login_at: DataTypes.DATE,
