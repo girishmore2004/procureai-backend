@@ -6,7 +6,15 @@ const generateCode = async (Model, prefix, field, companyId) => {
   const count = await Model.count({ where: { company_id: companyId } });
   return `${prefix}-${String(count + 1).padStart(5, '0')}`;
 };
-
+const generateTempPassword = () => {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const symbols = '!@#$%';
+  let pwd = '';
+  for (let i = 0; i < 8; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+  pwd += symbols[Math.floor(Math.random() * symbols.length)];
+  return pwd;
+};
+// ...added to module.exports
 const paginate = (query = {}) => {
   const page = Math.max(1, parseInt(query.page) || 1);
   const perPage = Math.min(100, Math.max(1, parseInt(query.per_page) || 20));
