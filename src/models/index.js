@@ -89,6 +89,22 @@ const VendorDocument = sequelize.define('VendorDocument', {
   uploaded_by: DataTypes.UUID,
 }, { tableName: 'vendor_documents' });
 
+// ADD this after the VendorDocument model definition (around line 60):
+
+const VendorCatalogItem = sequelize.define('VendorCatalogItem', {
+  ...UUID_PK,
+  vendor_id:   { type: DataTypes.UUID, allowNull: false },
+  company_id:  { type: DataTypes.UUID, allowNull: false }, // denorm for fast buyer search
+  name:        { type: DataTypes.STRING, allowNull: false },
+  category:    { type: DataTypes.STRING, allowNull: false },
+  unit:        { type: DataTypes.STRING },
+  price:       { type: DataTypes.DECIMAL(14, 2) },
+  min_order_qty: { type: DataTypes.DECIMAL, defaultValue: 1 },
+  lead_time_days: { type: DataTypes.INTEGER },
+  description: { type: DataTypes.TEXT },
+  is_active:   { type: DataTypes.BOOLEAN, defaultValue: true },
+}, { tableName: 'vendor_catalog_items' });
+
 const Item = sequelize.define('Item', {
   ...UUID_PK,
   company_id: { type: DataTypes.UUID, allowNull: false },
