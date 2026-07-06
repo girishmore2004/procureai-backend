@@ -29,7 +29,7 @@ exports.upload = asyncHandler(async (req, res) => {
   // Extract synchronously (not via background queue) - avoids the uploaded file
   // being wiped by a service redeploy/restart before a queued job gets to read it.
   try {
-    await extractInvoice(invoice.id, req.file.location || req.file.path);
+    await extractInvoice(invoice.id, req.file.location || req.file.path, req.file.mimetype, req.file.originalname);
     await invoice.reload();
   } catch (e) {
     console.error('[Invoice extraction] failed:', e.message);
@@ -88,43 +88,42 @@ exports.match = asyncHandler(async (req, res) => {
   const matchType = grn ? '3-way' : '2-way';
   const matchStatus = mismatches.length ? 'mismatched' : 'matched';
   await invoice.update({ match_status: matchStatus, match_type: matchType, mismatch_reason: mismatches.join('; ') || null });
-  // ADD after: await invoice.update({ match_status: matchStatus, ... });
 
-// Auto-notify vendor on mismatch
-if (matchStatus === 'mismatched') {
-  try {
-    const { Vendor: VendorModel } = require('../models');
-    const invoiceVendor = await VendorModel.findByPk(invoice.vendor_id);
-    if (invoiceVendor?.email) {
-      const { sendMail, notifyUser } = require('../services/notificationService');
-      const mismatchDetails = mismatches.join('\n• ');
-      await sendMail({
-        to: invoiceVendor.email,
-        subject: `Invoice mismatch — action required`,
-        html: `<p>Dear ${invoiceVendor.contact_person || invoiceVendor.name},</p>
-               <p>Your invoice could not be matched against the purchase order.</p>
-               <p><strong>Issues found:</strong></p>
-               <ul>${mismatches.map((m) => `<li>${m}</li>`).join('')}</ul>
-               <p>Please contact the buyer or log in to your <a href="${process.env.APP_URL}/vendor-portal/orders">vendor portal</a> to view details and raise a message.</p>`,
-      }).catch(console.error);
-      // Also post a system message on the PO thread
-      const { Message } = require('../models');
-      if (invoice.purchase_order_id) {
-        await Message.create({
-          company_id: invoice.company_id,
-          purchase_order_id: invoice.purchase_order_id,
-          sender_type: 'vendor',
-          sender_id: invoice.vendor_id,
-          sender_name: invoiceVendor.name,
-          body: `⚠️ Invoice mismatch detected:\n• ${mismatchDetails}\nPlease review and resolve.`,
-          is_system: true,
-        }).catch(() => {});
+  // Auto-notify vendor on mismatch
+  if (matchStatus === 'mismatched') {
+    try {
+      const { Vendor: VendorModel } = require('../models');
+      const invoiceVendor = await VendorModel.findByPk(invoice.vendor_id);
+      if (invoiceVendor?.email) {
+        const { sendMail, notifyUser } = require('../services/notificationService');
+        const mismatchDetails = mismatches.join('\n• ');
+        await sendMail({
+          to: invoiceVendor.email,
+          subject: `Invoice mismatch — action required`,
+          html: `<p>Dear ${invoiceVendor.contact_person || invoiceVendor.name},</p>
+                 <p>Your invoice could not be matched against the purchase order.</p>
+                 <p><strong>Issues found:</strong></p>
+                 <ul>${mismatches.map((m) => `<li>${m}</li>`).join('')}</ul>
+                 <p>Please contact the buyer or log in to your <a href="${process.env.APP_URL}/vendor-portal/orders">vendor portal</a> to view details and raise a message.</p>`,
+        }).catch(console.error);
+        // Also post a system message on the PO thread
+        const { Message } = require('../models');
+        if (invoice.purchase_order_id) {
+          await Message.create({
+            company_id: invoice.company_id,
+            purchase_order_id: invoice.purchase_order_id,
+            sender_type: 'vendor',
+            sender_id: invoice.vendor_id,
+            sender_name: invoiceVendor.name,
+            body: `⚠️ Invoice mismatch detected:\n• ${mismatchDetails}\nPlease review and resolve.`,
+            is_system: true,
+          }).catch(() => {});
+        }
       }
+    } catch (e) {
+      console.warn('[Mismatch notify] failed:', e.message);
     }
-  } catch (e) {
-    console.warn('[Mismatch notify] failed:', e.message);
   }
-}
   await audit({ companyId: req.companyId, userId: req.user.id, action: `invoice.${matchStatus}`, entityType: 'Invoice', entityId: invoice.id, ip: req.ip });
   okResponse(res, { match_status: matchStatus, match_type: matchType, mismatches });
 });
