@@ -18,28 +18,41 @@ exports.list = asyncHandler(async (req, res) => {
 });
 
 exports.create = asyncHandler(async (req, res) => {
-  const { name, email, phone, whatsapp_number, contact_person, address, gstin, legal_name, categories, payment_terms, lead_time_days, moq, preferred, notes } = req.body;
-  if (!name) return errorResponse(res, 'VALIDATION_ERROR', 'Vendor name required');
-  const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
-  const vendor = await Vendor.create({ company_id: req.companyId, name, email, phone, whatsapp_number, contact_person, address, gstin, legal_name, categories, payment_terms, lead_time_days, moq, preferred, notes, vendor_code });
-  await audit({ companyId: req.companyId, userId: req.user.id, action: 'vendor.created', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
-  okResponse(res, vendor, 201); 
-  // ADD after vendor is created (after Vendor.create):
   const { generateTempPassword } = require('../utils/helpers');
   const bcrypt = require('bcryptjs');
-
-// Set temp password for vendor portal
-  const tempPassword = generateTempPassword();
-  const hash = await bcrypt.hash(tempPassword, 10);
-  await vendor.update({ password_hash: hash, portal_status: 'invited', portal_invited_at: new Date() });
-
-// Send invite email
   const { sendVendorInviteEmail } = require('../services/notificationService');
-  const portalUrl = `${process.env.APP_URL || process.env.FRONTEND_URL}/vendor-portal/login`;
-  await sendVendorInviteEmail({ vendor, tempPassword, portalUrl }).catch((e) =>
-  console.warn('[Vendor Invite Email] failed:', e.message)
-);
+
+  const { name, email, phone, whatsapp_number, contact_person, address, gstin, legal_name, categories, payment_terms, lead_time_days, moq, preferred, notes } = req.body;
+  if (!name) return errorResponse(res, 'VALIDATION_ERROR', 'Vendor name required');
+
+  // Normalize email so it always matches the lowercase lookup used at vendor-portal login
+  const normalizedEmail = email ? email.trim().toLowerCase() : email;
+
+  const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
+
+  // Set up the vendor portal temp password BEFORE creating the row, so the
+  // record is created with password_hash already populated in one shot —
+  // no dangling work left to run after the HTTP response has been sent.
+  const tempPassword = generateTempPassword();
+  const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+  const vendor = await Vendor.create({
+    company_id: req.companyId, name, email: normalizedEmail, phone, whatsapp_number,
+    contact_person, address, gstin, legal_name, categories, payment_terms,
+    lead_time_days, moq, preferred, notes, vendor_code,
+    password_hash: passwordHash, portal_status: 'invited', portal_invited_at: new Date(),
+  });
+
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'vendor.created', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
+
+  // Send invite email — best-effort, must not block or fail the create response
+  if (normalizedEmail) {
+    const portalUrl = `${process.env.APP_URL || process.env.FRONTEND_URL}/vendor-portal/login`;
+    sendVendorInviteEmail({ vendor, tempPassword, portalUrl }).catch((e) =>
+      console.warn('[Vendor Invite Email] failed:', e.message)
+    );
+  }
+
   okResponse(res, vendor, 201);
 });
 
