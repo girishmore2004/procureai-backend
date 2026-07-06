@@ -19,7 +19,7 @@ exports.login = asyncHandler(async (req, res) => {
   if (!email || !password)
     return errorResponse(res, 'VALIDATION_ERROR', 'Email and password required');
 
-  const vendor = await Vendor.findOne({ where: { email: email.toLowerCase(), deleted_at: null } });
+  const vendor = await Vendor.findOne({ where: { email: email.trim().toLowerCase(), deleted_at: null } });
   if (!vendor || !vendor.password_hash)
     return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
 
@@ -58,7 +58,7 @@ exports.setPassword = asyncHandler(async (req, res) => {
   if (new_password.length < 8)
     return errorResponse(res, 'VALIDATION_ERROR', 'New password must be at least 8 characters');
 
-  const vendor = await Vendor.findOne({ where: { email: email.toLowerCase(), deleted_at: null } });
+  const vendor = await Vendor.findOne({ where: { email: email.trim().toLowerCase(), deleted_at: null } });
   if (!vendor || !vendor.password_hash)
     return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or temp password' } });
 
@@ -184,7 +184,6 @@ exports.deleteCatalogItem = asyncHandler(async (req, res) => {
   await item.destroy();
   okResponse(res, { message: 'Catalog item removed' });
 });
-// ADD this to src/controllers/vendorAuthController.js
 
 // ── GET /vendor-portal/orders ────────────────────────────────────────
 // Vendors see POs issued to them, with unread message count
