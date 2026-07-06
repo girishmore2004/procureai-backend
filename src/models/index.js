@@ -82,6 +82,9 @@ const Vendor = sequelize.define('Vendor', {
   notes: DataTypes.TEXT,
   status: { type: DataTypes.STRING, defaultValue: 'active' },
   deleted_at: DataTypes.DATE,
+  password_hash:      DataTypes.STRING,
+  portal_status:      { type: DataTypes.STRING, defaultValue: 'invited' }, // invited|active|disabled
+  portal_invited_at:  DataTypes.DATE,
 }, { tableName: 'vendors' });
 
 const VendorDocument = sequelize.define('VendorDocument', {
@@ -96,17 +99,31 @@ const VendorDocument = sequelize.define('VendorDocument', {
 
 const VendorCatalogItem = sequelize.define('VendorCatalogItem', {
   ...UUID_PK,
-  vendor_id:   { type: DataTypes.UUID, allowNull: false },
-  company_id:  { type: DataTypes.UUID, allowNull: false }, // denorm for fast buyer search
-  name:        { type: DataTypes.STRING, allowNull: false },
-  category:    { type: DataTypes.STRING, allowNull: false },
-  unit:        { type: DataTypes.STRING },
-  price:       { type: DataTypes.DECIMAL(14, 2) },
-  min_order_qty: { type: DataTypes.DECIMAL, defaultValue: 1 },
-  lead_time_days: { type: DataTypes.INTEGER },
-  description: { type: DataTypes.TEXT },
-  is_active:   { type: DataTypes.BOOLEAN, defaultValue: true },
+  vendor_id:      { type: DataTypes.UUID, allowNull: false },
+  company_id:     { type: DataTypes.UUID, allowNull: false },
+  name:           { type: DataTypes.STRING, allowNull: false },
+  category:       { type: DataTypes.STRING, allowNull: false },
+  unit:           DataTypes.STRING,
+  price:          DataTypes.DECIMAL(14, 2),
+  min_order_qty:  { type: DataTypes.DECIMAL, defaultValue: 1 },
+  lead_time_days: DataTypes.INTEGER,
+  description:    DataTypes.TEXT,
+  is_active:      { type: DataTypes.BOOLEAN, defaultValue: true },
 }, { tableName: 'vendor_catalog_items' });
+
+// Thread-per-PO messaging between company users and vendors
+const Message = sequelize.define('Message', {
+  ...UUID_PK,
+  company_id:     { type: DataTypes.UUID, allowNull: false },
+  // either purchase_order_id or invoice_id (one must be set)
+  purchase_order_id: DataTypes.UUID,
+  invoice_id:     DataTypes.UUID,
+  sender_type:    { type: DataTypes.STRING, allowNull: false }, // 'company_user' | 'vendor'
+  sender_id:      { type: DataTypes.UUID, allowNull: false },   // User.id or Vendor.id
+  sender_name:    DataTypes.STRING,                             // denorm for display
+  body:           { type: DataTypes.TEXT, allowNull: false },
+  is_system:      { type: DataTypes.BOOLEAN, defaultValue: false }, // auto-generated (mismatch alerts)
+}, { tableName: 'messages', updatedAt: false });
 
 const Item = sequelize.define('Item', {
   ...UUID_PK,
@@ -412,7 +429,12 @@ Vendor.hasMany(PurchaseOrder, { foreignKey: 'vendor_id' });
 Vendor.hasMany(VendorScore, { foreignKey: 'vendor_id' });
 
 Vendor.hasMany(VendorCatalogItem, { foreignKey: 'vendor_id', as: 'catalogItems' });
-VendorCatalogItem.belongsTo(Vendor, { foreignKey: 'vendor_id' });
+VendorCatalogItem.belongsTo(Vendor, { foreignKey: 'vendor_id', as: 'Vendor' });
+
+PurchaseOrder.hasMany(Message, { foreignKey: 'purchase_order_id', as: 'messages' });
+Message.belongsTo(PurchaseOrder, { foreignKey: 'purchase_order_id' });
+Invoice.hasMany(Message, { foreignKey: 'invoice_id', as: 'messages' });
+Message.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 
 PurchaseRequest.hasMany(PurchaseRequestItem, { foreignKey: 'purchase_request_id', as: 'items' });
 PurchaseRequestItem.belongsTo(PurchaseRequest, { foreignKey: 'purchase_request_id' });
@@ -470,6 +492,8 @@ Approval.belongsTo(PurchaseOrder, { foreignKey: 'approvable_id', constraints: fa
 
 User.hasMany(Approval, { foreignKey: 'approver_id', constraints: false });
 Approval.belongsTo(User, { as: 'Approver', foreignKey: 'approver_id', constraints: false });
+
+
 
 module.exports = {
   sequelize,
