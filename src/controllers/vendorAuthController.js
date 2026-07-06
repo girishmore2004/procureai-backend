@@ -184,3 +184,22 @@ exports.deleteCatalogItem = asyncHandler(async (req, res) => {
   await item.destroy();
   okResponse(res, { message: 'Catalog item removed' });
 });
+// ADD this to src/controllers/vendorAuthController.js
+
+// ── GET /vendor-portal/orders ────────────────────────────────────────
+// Vendors see POs issued to them, with unread message count
+exports.listMyOrders = asyncHandler(async (req, res) => {
+  const { PurchaseOrder, PoItem, Message } = require('../models');
+  const orders = await PurchaseOrder.findAll({
+    where: { vendor_id: req.vendorId },
+    include: [{ model: PoItem, as: 'items' }],
+    order: [['created_at', 'DESC']],
+    limit: 50,
+  });
+  // Attach unread message count per PO
+  const enriched = await Promise.all(orders.map(async (po) => {
+    const msgCount = await Message.count({ where: { purchase_order_id: po.id } });
+    return { ...po.toJSON(), message_count: msgCount };
+  }));
+  okResponse(res, enriched);
+});
