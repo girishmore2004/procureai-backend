@@ -506,5 +506,5 @@ module.exports = {
   GoodsReceipt, GoodsReceiptItem,
   Invoice, InvoiceItem,
   VendorScore, Inventory, ReorderRule,
-  Notification, Attachment, AuditLog, Setting,VendorCatalogItem,
+  Notification, Attachment, AuditLog, Setting,VendorCatalogItem,Message,
 };
