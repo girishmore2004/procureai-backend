@@ -353,16 +353,29 @@ function matchPoItem(rawName, poItems) {
   return best;
 }
 
-async function extractInvoice(invoiceId, filePath) {
+async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
   const { Invoice, InvoiceItem, PoItem } = require('../models');
   const invoice = await Invoice.findByPk(invoiceId);
   if (!invoice) throw new Error('Invoice not found');
-  const rawText = await extractTextFromFile(filePath);
+
+  const buffer = await loadFileBuffer(filePath);
+  const rawText = await extractTextFromBuffer(buffer, mimetype, originalname || filePath);
+  if (!rawText || rawText.trim().length < 10) {
+    throw new Error('Could not read any text from this invoice file. Try a clearer scan or enter the values manually.');
+  }
+
   const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, confidence_score}], confidence_overall }. Text:\n${rawText}`;
-  const structured = tryParseJson((await callLLM(prompt)).content);
+  const { content, mock } = await callLLM(prompt);
+  const structured = tryParseJson(content);
   if (!structured) {
     await invoice.update({ mismatch_reason: 'AI response could not be parsed as JSON — please review this invoice manually.' });
     throw new Error('AI response could not be parsed as JSON');
+  }
+
+  // No LLM_API_KEY configured — make this visible instead of silently showing ₹0/no items
+  if (mock) {
+    await invoice.update({ mismatch_reason: 'AI extraction is not configured (LLM_API_KEY missing) — please enter this invoice\'s values manually.' });
+    return structured;
   }
   await AiExtraction.create({ company_id: invoice.company_id, source_table: 'invoice', source_id: invoice.id, raw_text: rawText, structured_json: structured, model_used: process.env.LLM_MODEL || 'gpt-4o-mini', confidence_overall: structured.confidence_overall });
 
