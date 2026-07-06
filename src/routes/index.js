@@ -22,6 +22,7 @@ const exports_ = require('../controllers/exportController');
 const { verifyVendorToken } = require('../middleware/vendorAuth');
 const vendorAuth = require('../controllers/vendorAuthController');
 const vendorDiscovery = require('../controllers/vendorDiscoveryController');
+const messages = require('../controllers/messageController');
 
 // ── AUTH ──────────────────────────────────────────────────────────────
 router.post('/auth/login', auth.login);
@@ -38,24 +39,37 @@ router.post('/companies', company.signup);
 // (who never log in) get a 401 Unauthorized on these routes.
 router.get('/public/rfq/:token', rfq.publicGetRfq);
 router.post('/public/rfq/:token/quote', upload.single('file'), rfq.publicSubmitQuote);
+// ── VENDOR PORTAL PUBLIC ──────────────────────────────────────────────
 router.post('/vendor-portal/login', vendorAuth.login);
 router.post('/vendor-portal/set-password', vendorAuth.setPassword);
 
-// ── VENDOR PORTAL PROTECTED (vendor JWT) ────────────────────────────
-router.get('/vendor-portal/me', verifyVendorToken, vendorAuth.getMe);
-router.patch('/vendor-portal/me', verifyVendorToken, vendorAuth.updateMe);
-router.patch('/vendor-portal/change-password', verifyVendorToken, vendorAuth.changePassword);
-router.get('/vendor-portal/catalog', verifyVendorToken, vendorAuth.listCatalog);
-router.post('/vendor-portal/catalog', verifyVendorToken, vendorAuth.addCatalogItem);
-router.patch('/vendor-portal/catalog/:id', verifyVendorToken, vendorAuth.updateCatalogItem);
-router.delete('/vendor-portal/catalog/:id', verifyVendorToken, vendorAuth.deleteCatalogItem);
+// ── VENDOR PORTAL PROTECTED (vendor JWT) ─────────────────────────────
+router.get('/vendor-portal/me',               verifyVendorToken, vendorAuth.getMe);
+router.patch('/vendor-portal/me',             verifyVendorToken, vendorAuth.updateMe);
+router.patch('/vendor-portal/change-password',verifyVendorToken, vendorAuth.changePassword);
+router.get('/vendor-portal/catalog',          verifyVendorToken, vendorAuth.listCatalog);
+router.post('/vendor-portal/catalog',         verifyVendorToken, vendorAuth.addCatalogItem);
+router.patch('/vendor-portal/catalog/:id',    verifyVendorToken, vendorAuth.updateCatalogItem);
+router.delete('/vendor-portal/catalog/:id',   verifyVendorToken, vendorAuth.deleteCatalogItem);
+// Vendor sees their own POs and messages
+router.get('/vendor-portal/orders',                        verifyVendorToken, vendorAuth.listMyOrders);
+router.get('/vendor-portal/orders/:id/messages',           verifyVendorToken, messages.vendorListForPO);
+router.post('/vendor-portal/orders/:id/messages',          verifyVendorToken, messages.vendorReplyOnPO);
+
 // All routes below require authentication
 router.use(verifyToken);
 
-// ── VENDOR DISCOVERY (company-user authenticated) ────────────────────
-router.get('/vendor-discovery/search', requirePermission('vendors.view'), vendorDiscovery.search);
-router.get('/vendor-discovery/categories', requirePermission('vendors.view'), vendorDiscovery.getCategories);
-router.get('/vendor-discovery/match-item/:itemId', requirePermission('vendors.view'), vendorDiscovery.matchItem);
+// ── VENDOR DISCOVERY ──────────────────────────────────────────────────
+router.get('/vendor-discovery/search',            requirePermission('vendors.view'), vendorDiscovery.search);
+router.get('/vendor-discovery/categories',        requirePermission('vendors.view'), vendorDiscovery.getCategories);
+router.get('/vendor-discovery/match-item/:itemId',requirePermission('vendors.view'), vendorDiscovery.matchItem);
+
+// ── MESSAGES (PO thread) ──────────────────────────────────────────────
+router.get('/purchase-orders/:id/messages',  requirePermission('po.view'),    messages.listForPO);
+router.post('/purchase-orders/:id/messages', requirePermission('po.create'),  messages.sendOnPO);
+router.get('/invoices/:id/messages',         requirePermission('invoices.view'),   messages.listForInvoice);
+router.post('/invoices/:id/messages',        requirePermission('invoices.create'), messages.sendOnInvoice);
+
 // ── COMPANY ───────────────────────────────────────────────────────────
 router.get('/companies/me', company.getMyCompany);
 router.patch('/companies/me', requirePermission('settings.edit'), company.updateMyCompany);
