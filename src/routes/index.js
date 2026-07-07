@@ -58,6 +58,9 @@ router.get('/vendor-portal/catalog',          verifyVendorToken, vendorAuth.list
 router.post('/vendor-portal/catalog',         verifyVendorToken, vendorAuth.addCatalogItem);
 router.patch('/vendor-portal/catalog/:id',    verifyVendorToken, vendorAuth.updateCatalogItem);
 router.delete('/vendor-portal/catalog/:id',   verifyVendorToken, vendorAuth.deleteCatalogItem);
+// Vendor self-service document upload (business docs — GSTIN cert, etc.)
+router.get('/vendor-portal/documents',        verifyVendorToken, vendorAuth.listDocuments);
+router.post('/vendor-portal/documents',       verifyVendorToken, upload.single('file'), vendorAuth.uploadDocument);
 // Vendor sees their own POs and messages
 router.get('/vendor-portal/orders',                        verifyVendorToken, vendorAuth.listMyOrders);
 router.get('/vendor-portal/orders/:id/messages',           verifyVendorToken, messages.vendorListForPO);
