@@ -51,38 +51,37 @@ exports.login = asyncHandler(async (req, res) => {
 });
 
 // ── POST /vendor-portal/signup (self-service vendor registration) ──────
-// Unlike vendorController.create (a buyer inviting a vendor with a temp
-// password), this is the vendor registering themselves against a buyer
-// company they've chosen (see companyApi/public companies search on the
-// signup page). The vendor sets their own password and is active immediately
-// — there's no separate buyer approval step in the current data model, so
-// buyers review/manage the vendor from the Vendors page same as any other row.
+// Vendor-first registration: the vendor creates their own portal account with
+// no buyer attached (company_id: null). There is no buyer company selection
+// at signup — that requirement has been removed entirely. A buyer later
+// discovers this vendor through vendor-discovery matching (item master /
+// category / capability), or the vendor can be separately invited by a
+// specific buyer via vendorController.create (which still sets company_id to
+// that buyer, unaffected by this change).
 exports.signup = asyncHandler(async (req, res) => {
-  const { company_id, name, email, password, phone, contact_person, gstin, categories } = req.body;
+  const { name, email, password, phone, contact_person, gstin, categories } = req.body;
 
-  if (!company_id || !name || !email || !password)
-    return errorResponse(res, 'VALIDATION_ERROR', 'company_id, name, email and password are required');
+  if (!name || !email || !password || !contact_person || !phone)
+    return errorResponse(res, 'VALIDATION_ERROR', 'name, email, password, contact_person and phone are required');
   if (password.length < 8)
     return errorResponse(res, 'VALIDATION_ERROR', 'Password must be at least 8 characters');
-
-  const { Company } = require('../models');
-  const company = await Company.findOne({ where: { id: company_id, status: 'active' } });
-  if (!company) return errorResponse(res, 'NOT_FOUND', 'Selected company not found', 404);
 
   const normalizedEmail = email.trim().toLowerCase();
   const existing = await Vendor.findOne({ where: { email: normalizedEmail, deleted_at: null } });
   if (existing) return errorResponse(res, 'DUPLICATE', 'An account with this email already exists — try logging in instead', 409);
 
-  const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', company_id);
+  // vendor_code is generated per company_id; self-registered vendors have no
+  // company yet, so codes are counted among the null-company (public) pool.
+  const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', null);
   const passwordHash = await bcrypt.hash(password, 10);
 
   const vendor = await Vendor.create({
-    company_id, name, email: normalizedEmail, phone, contact_person, gstin,
+    company_id: null, name, email: normalizedEmail, phone, contact_person, gstin,
     categories: categories || [], vendor_code,
     password_hash: passwordHash, portal_status: 'active', portal_invited_at: new Date(),
   });
 
-  await audit({ companyId: company_id, userId: null, action: 'vendor.self_registered', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
+  await audit({ companyId: null, userId: null, action: 'vendor.self_registered', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
 
   const token = signVendorToken(vendor.id);
   okResponse(res, {
@@ -122,6 +121,23 @@ exports.setPassword = asyncHandler(async (req, res) => {
   okResponse(res, { token, message: 'Password set — you are now logged in' });
 });
 
+// Fields required for a vendor profile to count as "complete" — used to drive
+// the profile-completion indicator on the vendor dashboard/profile page.
+const PROFILE_COMPLETION_FIELDS = [
+  'name', 'contact_person', 'phone', 'address', 'gstin', 'categories',
+];
+
+function computeProfileCompleteness(vendor) {
+  const total = PROFILE_COMPLETION_FIELDS.length;
+  const filled = PROFILE_COMPLETION_FIELDS.filter((f) => {
+    const v = vendor[f];
+    if (Array.isArray(v)) return v.length > 0;
+    if (v && typeof v === 'object') return Object.keys(v).length > 0;
+    return v !== null && v !== undefined && v !== '';
+  }).length;
+  return Math.round((filled / total) * 100);
+}
+
 // ── GET /vendor-portal/me ────────────────────────────────────────────
 exports.getMe = asyncHandler(async (req, res) => {
   okResponse(res, {
@@ -140,6 +156,8 @@ exports.getMe = asyncHandler(async (req, res) => {
     moq: req.vendor.moq,
     rating: req.vendor.rating,
     portal_status: req.vendor.portal_status,
+    company_id: req.vendor.company_id,
+    profile_completeness: computeProfileCompleteness(req.vendor),
   });
 });
 
@@ -147,7 +165,7 @@ exports.getMe = asyncHandler(async (req, res) => {
 exports.updateMe = asyncHandler(async (req, res) => {
   const allowed = [
     'name', 'legal_name', 'contact_person', 'phone', 'whatsapp_number',
-    'address', 'gstin', 'payment_terms', 'lead_time_days', 'moq',
+    'address', 'gstin', 'payment_terms', 'lead_time_days', 'moq', 'categories',
   ];
   allowed.forEach((f) => { if (req.body[f] !== undefined) req.vendor[f] = req.body[f]; });
   await req.vendor.save();
@@ -159,7 +177,7 @@ exports.updateMe = asyncHandler(async (req, res) => {
     entityId: req.vendor.id,
     ip: req.ip,
   });
-  okResponse(res, { message: 'Profile updated' });
+  okResponse(res, { message: 'Profile updated', profile_completeness: computeProfileCompleteness(req.vendor) });
 });
 
 // ── PATCH /vendor-portal/change-password ────────────────────────────
@@ -177,6 +195,31 @@ exports.changePassword = asyncHandler(async (req, res) => {
   const hash = await bcrypt.hash(new_password, 10);
   await req.vendor.update({ password_hash: hash });
   okResponse(res, { message: 'Password changed' });
+});
+
+// ── DOCUMENTS (self-upload, mirrors vendorController.uploadDocument) ───
+
+// GET /vendor-portal/documents
+exports.listDocuments = asyncHandler(async (req, res) => {
+  const { VendorDocument } = require('../models');
+  const docs = await VendorDocument.findAll({
+    where: { vendor_id: req.vendorId },
+    order: [['created_at', 'DESC']],
+  });
+  okResponse(res, docs);
+});
+
+// POST /vendor-portal/documents
+exports.uploadDocument = asyncHandler(async (req, res) => {
+  const { VendorDocument } = require('../models');
+  if (!req.file) return errorResponse(res, 'VALIDATION_ERROR', 'File required');
+  const doc = await VendorDocument.create({
+    vendor_id: req.vendorId,
+    type: req.body.type || 'other',
+    file_url: req.file.path || req.file.location || req.file.originalname,
+    uploaded_by: null,
+  });
+  okResponse(res, doc, 201);
 });
 
 // ── CATALOG ──────────────────────────────────────────────────────────
