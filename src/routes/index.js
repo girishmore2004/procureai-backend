@@ -151,6 +151,7 @@ router.get('/purchase-orders', requirePermission('po.view'), po.list);
 router.post('/purchase-orders', requirePermission('po.create'), po.create);
 router.get('/purchase-orders/:id', requirePermission('po.view'), po.getOne);
 router.patch('/purchase-orders/:id', requirePermission('po.create'), po.update);
+router.post('/purchase-orders/:id/submit', requirePermission('po.create'), po.submit);
 router.post('/purchase-orders/:id/send', requirePermission('po.send'), po.send);
 router.get('/purchase-orders/:id/pdf', requirePermission('po.view'), po.downloadPdf);
 
@@ -166,6 +167,7 @@ router.post('/invoices', requirePermission('invoices.create'), upload.single('fi
 router.get('/invoices/:id', requirePermission('invoices.view'), invoices.getOne);
 router.post('/invoices/:id/match', requirePermission('invoices.view'), invoices.match);
 router.post('/invoices/:id/approve', requirePermission('invoices.approve'), invoices.approve);
+router.post('/invoices/:id/mark-paid', requirePermission('invoices.approve'), invoices.markPaid);
 router.patch('/invoices/:id/items/:item_id', requirePermission('invoices.create'), invoices.updateItem);
 
 // ── INVENTORY & REORDER ───────────────────────────────────────────────
