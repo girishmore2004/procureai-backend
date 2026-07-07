@@ -33,6 +33,7 @@ router.post('/auth/reset-password', auth.resetPassword);
 
 // ── COMPANY SIGNUP (public) ──────────────────────────────────────────
 router.post('/companies', company.signup);
+router.get('/public/companies/search', company.searchPublic);
 
 // ── PUBLIC VENDOR QUOTE ENDPOINTS (no auth - token-based) ─────────────
 // Must stay ABOVE router.use(verifyToken) below, otherwise vendors
@@ -45,6 +46,7 @@ router.get('/public/rfq/:token', rfq.publicGetRfq);
 router.post('/public/rfq/:token/validate', vendorUpload.single('file'), rfq.publicValidateQuote);
 router.post('/public/rfq/:token/quote', vendorUpload.single('file'), rfq.publicSubmitQuote);
 // ── VENDOR PORTAL PUBLIC ──────────────────────────────────────────────
+router.post('/vendor-portal/signup', vendorAuth.signup);
 router.post('/vendor-portal/login', vendorAuth.login);
 router.post('/vendor-portal/set-password', vendorAuth.setPassword);
 
