@@ -57,6 +57,10 @@ exports.create = asyncHandler(async (req, res) => {
 });
 
 exports.importCsv = asyncHandler(async (req, res) => {
+  const { generateTempPassword } = require('../utils/helpers');
+  const bcrypt = require('bcryptjs');
+  const { sendVendorInviteEmail } = require('../services/notificationService');
+
   if (!req.file) return errorResponse(res, 'VALIDATION_ERROR', 'CSV/Excel file required');
   const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
   const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -74,13 +78,26 @@ exports.importCsv = asyncHandler(async (req, res) => {
     }
     try {
       const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
-      await Vendor.create({
-        company_id: req.companyId, name: row.name, email: row.email, phone: row.phone,
+      // Generate a vendor-portal temp password and invite, same as the manual
+      // create() flow — without this, imported vendors had no password_hash and
+      // could never log in to the vendor portal, with no way to recover.
+      const normalizedEmail = row.email ? String(row.email).trim().toLowerCase() : row.email;
+      const tempPassword = generateTempPassword();
+      const passwordHash = await bcrypt.hash(tempPassword, 10);
+      const vendor = await Vendor.create({
+        company_id: req.companyId, name: row.name, email: normalizedEmail, phone: row.phone,
         whatsapp_number: row.whatsapp_number, contact_person: row.contact_person,
         gstin: row.gstin, payment_terms: row.payment_terms,
         lead_time_days: row.lead_time_days ? Number(row.lead_time_days) : null,
         vendor_code,
+        password_hash: passwordHash, portal_status: 'invited', portal_invited_at: new Date(),
       });
+      if (normalizedEmail) {
+        const portalUrl = `${process.env.APP_URL || process.env.FRONTEND_URL}/vendor-portal/login`;
+        sendVendorInviteEmail({ vendor, tempPassword, portalUrl }).catch((e) =>
+          console.warn('[Vendor Invite Email] failed:', e.message)
+        );
+      }
       results.created++;
     } catch (e) { results.errors.push({ row: i + 2, message: e.message }); }
   }
