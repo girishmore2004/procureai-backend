@@ -28,6 +28,15 @@ exports.create = asyncHandler(async (req, res) => {
   // Normalize email so it always matches the lowercase lookup used at vendor-portal login
   const normalizedEmail = email ? email.trim().toLowerCase() : email;
 
+  if (normalizedEmail) {
+    const existingEmail = await Vendor.findOne({ where: { email: normalizedEmail, deleted_at: null } });
+    if (existingEmail) return errorResponse(res, 'DUPLICATE', 'A vendor with this email already exists', 409);
+  }
+  if (gstin) {
+    const existingGstin = await Vendor.findOne({ where: { company_id: req.companyId, gstin, deleted_at: null } });
+    if (existingGstin) return errorResponse(res, 'DUPLICATE', 'A vendor with this GSTIN already exists', 409);
+  }
+
   const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', req.companyId);
 
   // Set up the vendor portal temp password BEFORE creating the row, so the
@@ -117,9 +126,24 @@ exports.getOne = asyncHandler(async (req, res) => {
 });
 
 exports.update = asyncHandler(async (req, res) => {
+  const { Op } = require('sequelize');
   const vendor = await Vendor.findOne({ where: { id: req.params.id, company_id: req.companyId } });
   if (!vendor) return errorResponse(res, 'NOT_FOUND', 'Vendor not found', 404);
   const before = vendor.toJSON();
+
+  if (req.body.email !== undefined) {
+    const normalizedEmail = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+    if (normalizedEmail && normalizedEmail !== vendor.email) {
+      const existingEmail = await Vendor.findOne({ where: { email: normalizedEmail, deleted_at: null, id: { [Op.ne]: vendor.id } } });
+      if (existingEmail) return errorResponse(res, 'DUPLICATE', 'A vendor with this email already exists', 409);
+    }
+    req.body.email = normalizedEmail;
+  }
+  if (req.body.gstin && req.body.gstin !== vendor.gstin) {
+    const existingGstin = await Vendor.findOne({ where: { company_id: req.companyId, gstin: req.body.gstin, deleted_at: null, id: { [Op.ne]: vendor.id } } });
+    if (existingGstin) return errorResponse(res, 'DUPLICATE', 'A vendor with this GSTIN already exists', 409);
+  }
+
   const allowed = ['name', 'legal_name', 'contact_person', 'email', 'phone', 'whatsapp_number', 'address', 'gstin', 'categories', 'payment_terms', 'lead_time_days', 'moq', 'preferred', 'notes', 'status'];
   allowed.forEach((f) => { if (req.body[f] !== undefined) vendor[f] = req.body[f]; });
   await vendor.save();
