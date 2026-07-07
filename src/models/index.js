@@ -69,7 +69,11 @@ const Vendor = sequelize.define('Vendor', {
   vendor_code: DataTypes.STRING,
   contact_person: DataTypes.STRING,
   phone: DataTypes.STRING,
-  email: DataTypes.STRING,
+  // Vendor-portal login looks vendors up by email alone (no company_id in the
+  // WHERE clause, since the portal login form has no notion of "which buyer"
+  // before authenticating), so two vendor rows sharing an email would make
+  // login non-deterministic. Unique + validated the same way User.email is.
+  email: { type: DataTypes.STRING, unique: true, validate: { isEmail: true } },
   whatsapp_number: DataTypes.STRING,
   address: DataTypes.JSONB,
   gstin: DataTypes.STRING,
