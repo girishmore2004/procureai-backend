@@ -53,8 +53,14 @@ const start = async () => {
     await sequelize.sync({ alter: true });
     console.log('✅ Models synced');
 
-    // Start background job workers (BullMQ)
-    require('./jobs/queues');
+    // NOTE: src/jobs/queues.js (BullMQ extraction queue/worker) is intentionally
+    // NOT started here. Nothing in the codebase calls extractionQueue.add() —
+    // invoice and quote extraction both run synchronously from their controllers
+    // (see invoiceController.upload, rfqController.publicSubmitQuote,
+    // quoteController.reprocess). Starting the worker was dead weight: an idle
+    // Redis connection for a queue that never receives jobs. The file is left in
+    // place in case background processing is wired up for real in the future.
+
     // Start scheduled cron jobs (reorder alerts, vendor scoring, RFQ reminders)
     const { startCronJobs } = require('./jobs/cron');
     startCronJobs();
