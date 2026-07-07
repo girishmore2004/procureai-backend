@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const { Op } = require('sequelize');
 const { Vendor, VendorCatalogItem } = require('../models');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { okResponse, errorResponse } = require('../utils/helpers');
+const { okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 
 const VENDOR_SECRET = () =>
@@ -48,6 +48,55 @@ exports.login = asyncHandler(async (req, res) => {
       portal_status: vendor.portal_status,
     },
   });
+});
+
+// ── POST /vendor-portal/signup (self-service vendor registration) ──────
+// Unlike vendorController.create (a buyer inviting a vendor with a temp
+// password), this is the vendor registering themselves against a buyer
+// company they've chosen (see companyApi/public companies search on the
+// signup page). The vendor sets their own password and is active immediately
+// — there's no separate buyer approval step in the current data model, so
+// buyers review/manage the vendor from the Vendors page same as any other row.
+exports.signup = asyncHandler(async (req, res) => {
+  const { company_id, name, email, password, phone, contact_person, gstin, categories } = req.body;
+
+  if (!company_id || !name || !email || !password)
+    return errorResponse(res, 'VALIDATION_ERROR', 'company_id, name, email and password are required');
+  if (password.length < 8)
+    return errorResponse(res, 'VALIDATION_ERROR', 'Password must be at least 8 characters');
+
+  const { Company } = require('../models');
+  const company = await Company.findOne({ where: { id: company_id, status: 'active' } });
+  if (!company) return errorResponse(res, 'NOT_FOUND', 'Selected company not found', 404);
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await Vendor.findOne({ where: { email: normalizedEmail, deleted_at: null } });
+  if (existing) return errorResponse(res, 'DUPLICATE', 'An account with this email already exists — try logging in instead', 409);
+
+  const vendor_code = await generateCode(Vendor, 'VEN', 'vendor_code', company_id);
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const vendor = await Vendor.create({
+    company_id, name, email: normalizedEmail, phone, contact_person, gstin,
+    categories: categories || [], vendor_code,
+    password_hash: passwordHash, portal_status: 'active', portal_invited_at: new Date(),
+  });
+
+  await audit({ companyId: company_id, userId: null, action: 'vendor.self_registered', entityType: 'Vendor', entityId: vendor.id, after: vendor.toJSON(), ip: req.ip });
+
+  const token = signVendorToken(vendor.id);
+  okResponse(res, {
+    token,
+    vendor: {
+      id: vendor.id,
+      name: vendor.name,
+      email: vendor.email,
+      contact_person: vendor.contact_person,
+      phone: vendor.phone,
+      company_id: vendor.company_id,
+      portal_status: vendor.portal_status,
+    },
+  }, 201);
 });
 
 // ── POST /vendor-portal/set-password (first-login password setup) ──
