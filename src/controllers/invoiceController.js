@@ -137,6 +137,27 @@ exports.approve = asyncHandler(async (req, res) => {
   okResponse(res, { message: 'Invoice approved for payment' });
 });
 
+// ── POST /invoices/:id/mark-paid ────────────────────────────────────
+// Previously there was no code path anywhere that ever set payment_status
+// to 'paid' — the "Approve for Payment" button only flipped match_status
+// to 'approved', after which the button disappeared (it required
+// match_status === 'matched') and payment_status stayed 'unpaid' forever.
+// This is the missing final step of the invoice lifecycle: finance actually
+// recording that the vendor has been paid.
+exports.markPaid = asyncHandler(async (req, res) => {
+  const invoice = await Invoice.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!invoice) return errorResponse(res, 'NOT_FOUND', 'Invoice not found', 404);
+  if (invoice.match_status !== 'approved') {
+    return errorResponse(res, 'INVALID_STATE', 'Invoice must be approved for payment before it can be marked paid', 409);
+  }
+  if (invoice.payment_status === 'paid') {
+    return errorResponse(res, 'INVALID_STATE', 'Invoice is already marked paid', 409);
+  }
+  await invoice.update({ payment_status: 'paid', paid_at: new Date(), paid_by: req.user.id });
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'invoice.paid', entityType: 'Invoice', entityId: invoice.id, ip: req.ip });
+  okResponse(res, { message: 'Invoice marked as paid', payment_status: 'paid', paid_at: invoice.paid_at });
+});
+
 exports.updateItem = asyncHandler(async (req, res) => {
   // Previously this only checked invoice_id, not company_id — any authenticated
   // user could edit another company's invoice line items by guessing the IDs.
