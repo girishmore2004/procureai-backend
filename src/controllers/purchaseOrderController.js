@@ -40,7 +40,15 @@ exports.create = asyncHandler(async (req, res) => {
 });
 
 exports.getOne = asyncHandler(async (req, res) => {
-  const po = await PurchaseOrder.findOne({ where: { id: req.params.id, company_id: req.companyId }, include: [Vendor, { model: PoItem, as: 'items' }] });
+  const { Approval } = require('../models');
+  const po = await PurchaseOrder.findOne({
+    where: { id: req.params.id, company_id: req.companyId },
+    include: [
+      Vendor,
+      { model: PoItem, as: 'items' },
+      { model: Approval, where: { approvable_type: 'purchase_order' }, required: false },
+    ],
+  });
   if (!po) return errorResponse(res, 'NOT_FOUND', 'PO not found', 404);
   okResponse(res, po);
 });
@@ -83,10 +91,34 @@ const generatePoPdf = async (po, vendor, items) => {
   });
 };
 
+// ── POST /purchase-orders/:id/submit ─────────────────────────────────
+// Was previously missing entirely: purchaseOrderController imported
+// triggerApprovalFlow but never called it anywhere, so a PO's approval
+// workflow — and the po.approve permission — never actually ran. send()
+// would let any draft PO go straight to the vendor. This mirrors the
+// existing purchaseRequestController.submit() pattern (which does work
+// correctly today) so POs go through the same kind of approval gate.
+exports.submit = asyncHandler(async (req, res) => {
+  const po = await PurchaseOrder.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!po) return errorResponse(res, 'NOT_FOUND', 'PO not found', 404);
+  if (po.status !== 'draft') return errorResponse(res, 'INVALID_STATE', 'Only draft POs can be submitted for approval', 409);
+  await po.update({ status: 'pending_approval' });
+  // If the company has no users holding po.approve, triggerApprovalFlow
+  // auto-approves the PO in place (same behavior already used for PRs).
+  await triggerApprovalFlow('purchase_order', po, req.companyId, req.user);
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'po.submitted', entityType: 'PurchaseOrder', entityId: po.id, ip: req.ip });
+  await po.reload();
+  okResponse(res, { message: po.status === 'approved' ? 'PO auto-approved (no approvers configured) — ready to send' : 'PO submitted for approval', status: po.status });
+});
+
 exports.send = asyncHandler(async (req, res) => {
   const po = await PurchaseOrder.findOne({ where: { id: req.params.id, company_id: req.companyId }, include: [Vendor, { model: PoItem, as: 'items' }] });
   if (!po) return errorResponse(res, 'NOT_FOUND', 'PO not found', 404);
-  if (!['draft', 'approved'].includes(po.status)) return errorResponse(res, 'INVALID_STATE', 'PO cannot be sent in this state', 409);
+  // 'draft' was previously allowed here too, which let a PO be sent to the
+  // vendor without ever passing through approval. A PO must now be
+  // submitted (see exports.submit) and approved — or auto-approved when no
+  // approvers are configured — before it can be sent.
+  if (po.status !== 'approved') return errorResponse(res, 'INVALID_STATE', 'PO must be submitted and approved before it can be sent', 409);
   const pdfPath = await generatePoPdf(po, po.Vendor, po.items);
   // In prod, upload pdfPath to S3 and store URL. For MVP, serve from /tmp.
   const pdfUrl = `/files/${path.basename(pdfPath)}`;
