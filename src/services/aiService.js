@@ -399,7 +399,14 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
       };
     }));
   }
-  await invoice.update({ invoice_number: structured.invoice_number || invoice.invoice_number, invoice_date: structured.invoice_date || invoice.invoice_date, total_amount: structured.total_amount || invoice.total_amount });
+  // The LLM's top-level total_amount is sometimes missing/unreliable even when it
+  // correctly extracted line items (multi-page invoices, odd layouts). Fall back to
+  // summing the extracted item totals — same approach already used for quotes —
+  // instead of falling back to invoice.total_amount, which is never set at upload
+  // time and so previously left the invoice showing ₹0.
+  const itemsTotal = (structured.items || []).reduce((s, i) => s + (parseFloat(i.total_price) || 0), 0);
+  const resolvedTotal = parseFloat(structured.total_amount) || itemsTotal || parseFloat(invoice.total_amount) || 0;
+  await invoice.update({ invoice_number: structured.invoice_number || invoice.invoice_number, invoice_date: structured.invoice_date || invoice.invoice_date, total_amount: resolvedTotal });
   return structured;
 }
 
