@@ -63,7 +63,13 @@ const User = sequelize.define('User', {
 
 const Vendor = sequelize.define('Vendor', {
   ...UUID_PK,
-  company_id: { type: DataTypes.UUID, allowNull: false },
+  // Nullable: a vendor can now self-register a portal account with no buyer
+  // attached (company_id: null). Buyer-invited vendors (vendorController.create)
+  // still set this to the inviting buyer's company id, so that flow is unchanged.
+  // Vendor discovery (vendorDiscoveryController) treats company_id: null rows as
+  // publicly matchable by any buyer, and company_id: <buyer> rows as that buyer's
+  // private/invited list only.
+  company_id: { type: DataTypes.UUID, allowNull: true },
   name: { type: DataTypes.STRING, allowNull: false },
   legal_name: DataTypes.STRING,
   vendor_code: DataTypes.STRING,
@@ -104,7 +110,10 @@ const VendorDocument = sequelize.define('VendorDocument', {
 const VendorCatalogItem = sequelize.define('VendorCatalogItem', {
   ...UUID_PK,
   vendor_id:      { type: DataTypes.UUID, allowNull: false },
-  company_id:     { type: DataTypes.UUID, allowNull: false },
+  // Nullable to match Vendor.company_id: a self-registered vendor's catalog
+  // items have company_id: null and are matchable by any buyer via vendor
+  // discovery; a buyer-invited vendor's catalog items keep that buyer's id.
+  company_id:     { type: DataTypes.UUID, allowNull: true },
   name:           { type: DataTypes.STRING, allowNull: false },
   category:       { type: DataTypes.STRING, allowNull: false },
   unit:           DataTypes.STRING,
