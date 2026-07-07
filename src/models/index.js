@@ -347,6 +347,11 @@ const Invoice = sequelize.define('Invoice', {
   mismatch_reason: DataTypes.TEXT,
   finance_approved_by: DataTypes.UUID,
   payment_status: { type: DataTypes.STRING, defaultValue: 'unpaid' },
+  // Set when payment_status transitions to 'paid' via invoiceController.markPaid.
+  // Previously there was no code path that ever set payment_status to 'paid',
+  // so an invoice-to-payment cycle time could never be computed.
+  paid_at: DataTypes.DATE,
+  paid_by: DataTypes.UUID,
 }, { tableName: 'invoices' });
 
 const InvoiceItem = sequelize.define('InvoiceItem', {
