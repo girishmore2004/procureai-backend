@@ -21,9 +21,23 @@ exports.create = asyncHandler(async (req, res) => {
   const pr = await PurchaseRequest.findOne({ where: { id: purchase_request_id, company_id: req.companyId } });
   if (!pr) return errorResponse(res, 'NOT_FOUND', 'Purchase Request not found', 404);
   if (pr.status !== 'approved') return errorResponse(res, 'INVALID_STATE', 'PR must be approved before creating RFQ', 409);
+
+  // vendor_ids come straight from the client — without this check a buyer
+  // could add another buyer's *private* invited vendor (company_id set to
+  // someone else) to their own RFQ just by guessing an id. Public
+  // self-registered vendors (company_id: null) and this buyer's own vendors
+  // are both fair game; anything else is rejected.
+  const validVendors = await Vendor.findAll({
+    where: { id: vendor_ids, [Op.or]: [{ company_id: null }, { company_id: req.companyId }], deleted_at: null },
+    attributes: ['id'],
+  });
+  const validIds = new Set(validVendors.map((v) => v.id));
+  const usableVendorIds = [...new Set(vendor_ids)].filter((vid) => validIds.has(vid));
+  if (!usableVendorIds.length) return errorResponse(res, 'VALIDATION_ERROR', 'None of the selected vendors are available to this company');
+
   const rfq_number = await generateCode(Rfq, 'RFQ', 'rfq_number', req.companyId);
   const rfq = await Rfq.create({ company_id: req.companyId, purchase_request_id, created_by: req.user.id, deadline, delivery_location, terms, special_instructions, rfq_number, status: 'draft' });
-  await RfqVendor.bulkCreate(vendor_ids.map((vid) => ({ rfq_id: rfq.id, vendor_id: vid, access_token: uuidv4(), status: 'pending' })));
+  await RfqVendor.bulkCreate(usableVendorIds.map((vid) => ({ rfq_id: rfq.id, vendor_id: vid, access_token: uuidv4(), status: 'pending' })));
   await pr.update({ status: 'converted_to_rfq' });
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'rfq.created', entityType: 'Rfq', entityId: rfq.id, after: { rfq_number }, ip: req.ip });
   okResponse(res, rfq, 201);
@@ -44,8 +58,17 @@ exports.addVendors = asyncHandler(async (req, res) => {
   const rfq = await Rfq.findOne({ where: { id: req.params.id, company_id: req.companyId }, include: [{ model: RfqVendor, as: 'rfqVendors' }, { model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items' }] }] });
   if (!rfq) return errorResponse(res, 'NOT_FOUND', 'RFQ not found', 404);
   const existingIds = new Set(rfq.rfqVendors.map((rv) => rv.vendor_id));
-  const newVendorIds = [...new Set(vendor_ids)].filter((vid) => !existingIds.has(vid));
-  if (!newVendorIds.length) return errorResponse(res, 'VALIDATION_ERROR', 'Selected vendor(s) are already on this RFQ');
+
+  // Same ownership check as rfqController.create — only public (company_id:
+  // null) or this buyer's own vendors may be attached to the RFQ.
+  const validVendors = await Vendor.findAll({
+    where: { id: vendor_ids, [Op.or]: [{ company_id: null }, { company_id: req.companyId }], deleted_at: null },
+    attributes: ['id'],
+  });
+  const validIds = new Set(validVendors.map((v) => v.id));
+
+  const newVendorIds = [...new Set(vendor_ids)].filter((vid) => !existingIds.has(vid) && validIds.has(vid));
+  if (!newVendorIds.length) return errorResponse(res, 'VALIDATION_ERROR', 'Selected vendor(s) are already on this RFQ or not available to this company');
   const created = await RfqVendor.bulkCreate(newVendorIds.map((vid) => ({ rfq_id: rfq.id, vendor_id: vid, access_token: uuidv4(), status: 'pending' })), { returning: true });
   const results = [];
   if (rfq.status === 'sent') {
