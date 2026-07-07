@@ -13,11 +13,13 @@ const SAFE_VENDOR_ATTRS = [
 
 // GET /vendor-discovery/search
 // Query params: category, q (material name), min_price, max_price, location
+// Matches catalog items from self-registered (public, company_id: null) vendors
+// — visible to every buyer — plus this buyer's own private/invited vendors.
 exports.search = asyncHandler(async (req, res) => {
   const { category, q, min_price, max_price } = req.query;
 
   const catalogWhere = {
-    company_id: req.companyId,
+    [Op.or]: [{ company_id: null }, { company_id: req.companyId }],
     is_active: true,
   };
   if (category) catalogWhere.category = { [Op.iLike]: `%${category}%` };
@@ -63,10 +65,11 @@ exports.search = asyncHandler(async (req, res) => {
 });
 
 // GET /vendor-discovery/categories
-// Returns all unique material categories available in this company's vendor catalog
+// Returns all unique material categories available across the public
+// self-registered vendor pool plus this buyer's own private/invited vendors.
 exports.getCategories = asyncHandler(async (req, res) => {
   const rows = await VendorCatalogItem.findAll({
-    where: { company_id: req.companyId, is_active: true },
+    where: { [Op.or]: [{ company_id: null }, { company_id: req.companyId }], is_active: true },
     attributes: ['category'],
     group: ['category'],
     order: [['category', 'ASC']],
@@ -75,7 +78,9 @@ exports.getCategories = asyncHandler(async (req, res) => {
 });
 
 // GET /vendor-discovery/match-item/:itemId
-// Suggests vendors that supply materials similar to a given Item Master item
+// Suggests vendors that supply materials similar to a given Item Master item,
+// drawn from the public self-registered vendor pool plus this buyer's own
+// private/invited vendors.
 exports.matchItem = asyncHandler(async (req, res) => {
   const item = await Item.findOne({ where: { id: req.params.itemId, company_id: req.companyId } });
   if (!item) return errorResponse(res, 'NOT_FOUND', 'Item not found', 404);
@@ -83,11 +88,13 @@ exports.matchItem = asyncHandler(async (req, res) => {
   // Search catalog by item name or category
   const matches = await VendorCatalogItem.findAll({
     where: {
-      company_id: req.companyId,
-      is_active: true,
-      [Op.or]: [
-        { name: { [Op.iLike]: `%${item.name}%` } },
-        { category: { [Op.iLike]: `%${item.category || ''}%` } },
+      [Op.and]: [
+        { [Op.or]: [{ company_id: null }, { company_id: req.companyId }] },
+        { is_active: true },
+        { [Op.or]: [
+          { name: { [Op.iLike]: `%${item.name}%` } },
+          { category: { [Op.iLike]: `%${item.category || ''}%` } },
+        ] },
       ],
     },
     include: [{
