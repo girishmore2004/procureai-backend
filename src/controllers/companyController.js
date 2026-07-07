@@ -34,6 +34,21 @@ exports.signup = asyncHandler(async (req, res) => {
   okResponse(res, { company: { id: company.id, name: company.name }, message: 'Company created — please login' }, 201);
 });
 
+// ── PUBLIC: search companies by name (vendor self-signup "find your buyer") ──
+// Deliberately returns only id + name — nothing else about the company is exposed.
+exports.searchPublic = asyncHandler(async (req, res) => {
+  const { Op } = require('sequelize');
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return okResponse(res, []);
+  const companies = await Company.findAll({
+    where: { name: { [Op.iLike]: `%${q}%` }, status: 'active' },
+    attributes: ['id', 'name'],
+    limit: 10,
+    order: [['name', 'ASC']],
+  });
+  okResponse(res, companies);
+});
+
 exports.getMyCompany = asyncHandler(async (req, res) => {
   const company = await Company.findByPk(req.companyId);
   okResponse(res, company);
