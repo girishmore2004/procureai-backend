@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { verifyToken, requirePermission, requireAnyPermission } = require('../middleware/auth');
-const { upload, csvUpload } = require('../middleware/upload');
+const { upload, vendorUpload, csvUpload } = require('../middleware/upload');
 
 const auth = require('../controllers/authController');
 const company = require('../controllers/companyController');
@@ -38,7 +38,12 @@ router.post('/companies', company.signup);
 // Must stay ABOVE router.use(verifyToken) below, otherwise vendors
 // (who never log in) get a 401 Unauthorized on these routes.
 router.get('/public/rfq/:token', rfq.publicGetRfq);
-router.post('/public/rfq/:token/quote', upload.single('file'), rfq.publicSubmitQuote);
+// Pre-submit preview: OCR/LLM-extracts the uploaded file and returns items for the
+// vendor to review before they confirm — frontend calls this from VendorQuotePage
+// via publicApi.validateQuote(). Was previously unrouted, causing every vendor
+// upload attempt to 404 and silently fall back to manual entry.
+router.post('/public/rfq/:token/validate', vendorUpload.single('file'), rfq.publicValidateQuote);
+router.post('/public/rfq/:token/quote', vendorUpload.single('file'), rfq.publicSubmitQuote);
 // ── VENDOR PORTAL PUBLIC ──────────────────────────────────────────────
 router.post('/vendor-portal/login', vendorAuth.login);
 router.post('/vendor-portal/set-password', vendorAuth.setPassword);
