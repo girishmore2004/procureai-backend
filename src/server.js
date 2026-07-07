@@ -13,6 +13,24 @@ const { errorHandler, notFound } = require('./middleware/errorHandler');
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// ── Trust proxy ──────────────────────────────────────────────────────
+// Render (and any other reverse-proxy host) sits in front of this app and sets
+// X-Forwarded-For/X-Forwarded-Proto. Without `trust proxy` set, Express ignores
+// those headers, so:
+//   1. express-rate-limit throws "ValidationError: The 'X-Forwarded-For' header
+//      is set but the Express 'trust proxy' setting is false" on every request,
+//      and (worse) falls back to keying rate limits off the proxy's own IP —
+//      meaning every user behind Render shares one rate-limit bucket.
+//   2. req.ip / req.secure are wrong, which breaks IP-based audit logging and
+//      any secure-cookie/HTTPS checks.
+// Render's docs recommend trusting exactly 1 hop (their load balancer). We only
+// enable this in production so local dev (no proxy in front of it) doesn't
+// silently start trusting a spoofable X-Forwarded-For header.
+if (process.env.NODE_ENV === 'production' || process.env.TRUST_PROXY) {
+  const configured = process.env.TRUST_PROXY;
+  app.set('trust proxy', configured ? (Number.isNaN(Number(configured)) ? configured : Number(configured)) : 1);
+}
+
 // ── Security middleware ─────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
