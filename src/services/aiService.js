@@ -109,8 +109,16 @@ async function loadFileBuffer(filePathOrUrl) {
     if (!res.ok) throw new Error(`Could not download the source file from storage (HTTP ${res.status}). It may have been removed.`);
     return Buffer.from(await res.arrayBuffer());
   }
+  // Quotes and invoices now store their servable URL (e.g. "/files/procureai-uploads/xyz.pdf"),
+  // the path our own server exposes via `app.use('/files', express.static('/tmp'))`.
+  // Resolve that back to the real on-disk path before reading it directly —
+  // re-extraction/re-processing doesn't go through HTTP.
+  let diskPath = filePathOrUrl;
+  if (filePathOrUrl.startsWith('/files/')) {
+    diskPath = path.join('/tmp', filePathOrUrl.slice('/files/'.length));
+  }
   try {
-    return fs.readFileSync(filePathOrUrl);
+    return fs.readFileSync(diskPath);
   } catch (e) {
     if (e.code === 'ENOENT') {
       // The file lived only on local disk and is gone — most likely a server restart/redeploy
@@ -364,7 +372,7 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
     throw new Error('Could not read any text from this invoice file. Try a clearer scan or enter the values manually.');
   }
 
-  const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, confidence_score}], confidence_overall }. Text:\n${rawText}`;
+  const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, tax, freight, discount, confidence_score}], confidence_overall }. Set tax, freight, and discount to 0 if the document doesn't mention them for a line. Text:\n${rawText}`;
   const { content, mock } = await callLLM(prompt);
   const structured = tryParseJson(content);
   if (!structured) {
@@ -395,6 +403,9 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
         quantity: i.quantity,
         unit_price: i.unit_price,
         total_price: i.total_price,
+        tax: i.tax || 0,
+        freight: i.freight || 0,
+        discount: i.discount || 0,
         confidence_score: i.confidence_score,
       };
     }));
@@ -446,4 +457,69 @@ async function validateQuoteFile(buffer, mimetype, originalname) {
     truncated,
   };
 }
-module.exports = { extractQuoteFromFile, validateQuoteFile, generateRecommendation, extractInvoice };
+// Diff a vendor's quoted line items against what the buyer's purchase request
+// actually asked for. Reuses the same name-normalization/fuzzy-match approach
+// already used for invoice-to-PO line matching (normalizeItemName/matchPoItem).
+// requestedItems is PurchaseRequestItem rows (optionally with an included Item).
+function compareQuoteToRequestedItems(quoteItems = [], requestedItems = []) {
+  const requested = requestedItems.map((ri) => ({
+    id: ri.id,
+    name: ri.Item?.name || ri.item_name_freetext || 'Unknown item',
+    quantity: parseFloat(ri.quantity) || 0,
+    estimated_unit_price: ri.estimated_unit_price != null ? parseFloat(ri.estimated_unit_price) : null,
+  }));
+
+  const usedQuoteItemIds = new Set();
+  const comparisons = requested.map((req) => {
+    const target = normalizeItemName(req.name);
+    let matched = null;
+    for (const qi of quoteItems) {
+      if (usedQuoteItemIds.has(qi.id)) continue;
+      const candidate = normalizeItemName(qi.item_name_raw);
+      if (!candidate) continue;
+      if (candidate === target) { matched = qi; break; }
+      if (!matched && (candidate.includes(target) || target.includes(candidate))) matched = qi;
+    }
+
+    if (!matched) {
+      return {
+        item_name: req.name, requested_quantity: req.quantity, quoted_quantity: null,
+        unit_price: null, total_price: null, estimated_unit_price: req.estimated_unit_price,
+        status: 'not_quoted',
+      };
+    }
+
+    usedQuoteItemIds.add(matched.id);
+    const quotedQty = parseFloat(matched.quantity) || 0;
+    const unitPrice = parseFloat(matched.unit_price) || 0;
+    const qtyMismatch = Math.abs(quotedQty - req.quantity) > 0.001;
+    // Flag if the vendor's unit price is more than 15% away from the buyer's own estimate.
+    const priceMismatch = req.estimated_unit_price != null && req.estimated_unit_price > 0 &&
+      Math.abs(unitPrice - req.estimated_unit_price) / req.estimated_unit_price > 0.15;
+
+    let status = 'matched';
+    if (qtyMismatch && priceMismatch) status = 'quantity_and_price_mismatch';
+    else if (qtyMismatch) status = 'quantity_mismatch';
+    else if (priceMismatch) status = 'price_mismatch';
+
+    return {
+      item_name: req.name, requested_quantity: req.quantity, quoted_quantity: quotedQty,
+      unit_price: unitPrice, total_price: parseFloat(matched.total_price) || 0,
+      estimated_unit_price: req.estimated_unit_price, status,
+    };
+  });
+
+  // Anything the vendor quoted that the buyer never asked for.
+  for (const qi of quoteItems) {
+    if (usedQuoteItemIds.has(qi.id)) continue;
+    comparisons.push({
+      item_name: qi.item_name_raw, requested_quantity: null, quoted_quantity: parseFloat(qi.quantity) || 0,
+      unit_price: parseFloat(qi.unit_price) || 0, total_price: parseFloat(qi.total_price) || 0,
+      estimated_unit_price: null, status: 'not_requested',
+    });
+  }
+
+  return comparisons;
+}
+
+module.exports = { extractQuoteFromFile, validateQuoteFile, generateRecommendation, extractInvoice, compareQuoteToRequestedItems };
