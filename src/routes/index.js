@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { verifyToken, requirePermission, requireAnyPermission } = require('../middleware/auth');
+const { verifyToken, requirePermission, requireAnyPermission, requirePlatformAdmin } = require('../middleware/auth');
 const { upload, vendorUpload, csvUpload } = require('../middleware/upload');
 
 const auth = require('../controllers/authController');
@@ -23,6 +23,7 @@ const { verifyVendorToken } = require('../middleware/vendorAuth');
 const vendorAuth = require('../controllers/vendorAuthController');
 const vendorDiscovery = require('../controllers/vendorDiscoveryController');
 const messages = require('../controllers/messageController');
+const platform = require('../controllers/platformController');
 
 // ── AUTH ──────────────────────────────────────────────────────────────
 router.post('/auth/login', auth.login);
@@ -200,5 +201,12 @@ router.get('/export/comparison', requirePermission('quotes.view'), exports_.expo
 router.get('/export/purchase-orders', requirePermission('po.view'), exports_.exportPurchaseOrders);
 router.get('/export/vendors', requirePermission('vendors.view'), exports_.exportVendors);
 router.get('/export/spend-report', requirePermission('analytics.view'), exports_.exportSpendReport);
+
+// ── PLATFORM OWNER (cross-company, read-only — requires is_platform_admin) ──
+router.get('/platform/overview', requirePlatformAdmin, platform.getOverview);
+router.get('/platform/approval-bottlenecks', requirePlatformAdmin, platform.getApprovalBottlenecks);
+router.get('/platform/usage-trends', requirePlatformAdmin, platform.getUsageTrends);
+router.get('/platform/top-entities', requirePlatformAdmin, platform.getTopEntities);
+router.get('/platform/alerts', requirePlatformAdmin, platform.getAlerts);
 
 module.exports = router;
