@@ -3,6 +3,7 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 const { extractInvoice } = require('../services/aiService');
+const { filePathToUrl } = require('../middleware/upload');
 
 exports.upload = asyncHandler(async (req, res) => {
   const { purchase_order_id, vendor_id } = req.body;
@@ -21,9 +22,12 @@ exports.upload = asyncHandler(async (req, res) => {
     if (!po) return errorResponse(res, 'NOT_FOUND', 'Purchase order not found', 404);
   }
 
+  // req.file.path is a raw filesystem path (e.g. "/tmp/procureai-uploads/xyz.pdf") —
+  // not something the frontend can open. filePathToUrl converts it to the "/files/..."
+  // path the server already serves statically, so "View File" on the invoice page works.
   const invoice = await Invoice.create({
     company_id: req.companyId, purchase_order_id, vendor_id,
-    file_url: req.file.location || req.file.path || req.file.originalname,
+    file_url: req.file.location || filePathToUrl(req.file.path) || req.file.originalname,
     match_status: 'pending', payment_status: 'unpaid',
   });
   // Extract synchronously (not via background queue) - avoids the uploaded file
@@ -82,6 +86,24 @@ exports.match = asyncHandler(async (req, res) => {
       const grni = grn.items?.find((g) => g.po_item_id === poItem.id);
       const receivedQty = parseFloat(grni?.quantity_received) || 0;
       if (Math.abs(invoiceQty - receivedQty) > 0.001) mismatches.push(`Qty mismatch for "${ii.item_name_raw}": Invoice ${invoiceQty} vs GRN ${receivedQty}`);
+    }
+  }
+
+  // Tax / freight / discount deltas — independent of GRN presence, since these
+  // compare invoice line items directly against the PO's line items. Only
+  // flagged where both sides actually carry a value, so older records (before
+  // these fields existed) default to 0/0 and stay silent instead of showing
+  // noisy false mismatches.
+  for (const ii of invoice.items) {
+    const poItem = po.items.find((p) => p.id === ii.po_item_id);
+    if (!poItem) continue; // already flagged above when a GRN exists
+    const deltaChecks = [['tax', 'Tax'], ['freight', 'Freight'], ['discount', 'Discount']];
+    for (const [field, label] of deltaChecks) {
+      const invoiceVal = parseFloat(ii[field]) || 0;
+      const poVal = parseFloat(poItem[field]) || 0;
+      if (Math.abs(invoiceVal - poVal) > 1) {
+        mismatches.push(`${label} mismatch for "${ii.item_name_raw}": Invoice ₹${invoiceVal} vs PO ₹${poVal}`);
+      }
     }
   }
 
@@ -165,7 +187,7 @@ exports.updateItem = asyncHandler(async (req, res) => {
   if (!invoice) return errorResponse(res, 'NOT_FOUND', 'Invoice not found', 404);
   const item = await InvoiceItem.findOne({ where: { id: req.params.item_id, invoice_id: req.params.id } });
   if (!item) return errorResponse(res, 'NOT_FOUND', 'Invoice item not found', 404);
-  ['item_name_raw', 'quantity', 'unit_price', 'total_price'].forEach((f) => { if (req.body[f] !== undefined) item[f] = req.body[f]; });
+  ['item_name_raw', 'quantity', 'unit_price', 'total_price', 'tax', 'freight', 'discount'].forEach((f) => { if (req.body[f] !== undefined) item[f] = req.body[f]; });
   item.confidence_score = 1.0;
   await item.save();
   okResponse(res, item);
