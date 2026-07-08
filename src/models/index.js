@@ -59,6 +59,12 @@ const User = sequelize.define('User', {
   status: { type: DataTypes.STRING, defaultValue: 'active' },
   last_login_at: DataTypes.DATE,
   deleted_at: DataTypes.DATE,
+  // Cross-company read-only access flag (see middleware/auth.js requirePlatformAdmin
+  // and controllers/platformController.js). Not a Role/Permission — those are all
+  // scoped to a single company_id by design, so this is deliberately a separate,
+  // manually-granted flag rather than something that goes through the normal
+  // per-company role system. Defaults false; nobody gets this by accident.
+  is_platform_admin: { type: DataTypes.BOOLEAN, defaultValue: false },
 }, { tableName: 'users' });
 
 const Vendor = sequelize.define('Vendor', {
