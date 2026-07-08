@@ -40,6 +40,7 @@ exports.login = asyncHandler(async (req, res) => {
     role: user.Role?.name,
     permissions: user.Role?.Permissions?.map((p) => p.code) || [],
     department: user.department,
+    is_platform_admin: !!user.is_platform_admin,
   };
 
   okResponse(res, { access_token, refresh_token, user: userData });
