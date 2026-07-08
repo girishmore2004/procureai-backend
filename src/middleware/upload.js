@@ -48,4 +48,28 @@ const csvUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-module.exports = { upload, vendorUpload, csvUpload };
+// Converts an absolute path under /tmp into the relative URL the server already
+// serves via `app.use('/files', express.static('/tmp'))` (server.js). Used so
+// any file written under uploadDir can be turned into something the frontend
+// can actually open, instead of a raw filesystem path.
+function filePathToUrl(absPath) {
+  if (!absPath) return null;
+  const rel = path.relative('/tmp', absPath);
+  return `/files/${rel.split(path.sep).join('/')}`;
+}
+
+// Persists an in-memory buffer (e.g. from vendorUpload's memoryStorage) to the
+// same disk location `upload` (diskStorage) already uses, and returns both the
+// real filesystem path and its servable URL.
+//
+// Needed for vendor quote uploads: these previously stayed in memory only long
+// enough for the synchronous extraction pass, then the bytes were discarded —
+// leaving no way to preview the vendor's original file or re-extract it later.
+function saveBufferToDisk(buffer, originalname) {
+  const filename = `${Date.now()}-${(originalname || 'file').replace(/\s+/g, '-')}`;
+  const destPath = path.join(uploadDir, filename);
+  fs.writeFileSync(destPath, buffer);
+  return { path: destPath, url: filePathToUrl(destPath) };
+}
+
+module.exports = { upload, vendorUpload, csvUpload, uploadDir, filePathToUrl, saveBufferToDisk };
