@@ -1,9 +1,9 @@
-const { Quote, QuoteItem, Vendor, AiRecommendation, RfqVendor, PurchaseOrder, PoItem, AiExtraction } = require('../models');
+const { Quote, QuoteItem, Vendor, AiRecommendation, RfqVendor, PurchaseOrder, PoItem, AiExtraction, Rfq, PurchaseRequest, PurchaseRequestItem, Item } = require('../models');
 const { Op } = require('sequelize');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
-const { generateRecommendation } = require('../services/aiService');
+const { generateRecommendation, compareQuoteToRequestedItems } = require('../services/aiService');
 
 exports.getOne = asyncHandler(async (req, res) => {
   const quote = await Quote.findOne({
@@ -21,11 +21,13 @@ exports.getOne = asyncHandler(async (req, res) => {
 exports.reprocess = asyncHandler(async (req, res) => {
   const quote = await Quote.findOne({ where: { id: req.params.id, company_id: req.companyId } });
   if (!quote) return errorResponse(res, 'NOT_FOUND', 'Quote not found', 404);
+  // Vendor quote files are now persisted to disk on submission (see
+  // rfqController.publicSubmitQuote), so source_file_url is a real "/files/..."
+  // path. The "[buffer]..." placeholder only remains on quotes submitted before
+  // this fix — keep that check as a graceful fallback for those legacy rows.
   if (!quote.source_file_url || quote.source_file_url.startsWith('[buffer]')) {
-    // File was processed from memory buffer — original bytes not stored on disk or S3.
-    // Cannot re-extract without the file. Prompt user to enter manually.
     return errorResponse(res, 'INVALID_STATE',
-      'The original file is no longer available for re-extraction (it was processed from memory). ' +
+      'The original file is no longer available for re-extraction (it was processed from memory before file persistence was added). ' +
       'Please edit the line items manually below or ask the vendor to resubmit their quote.', 400);
   }
   await quote.update({ extraction_status: 'pending', extraction_note: null });
@@ -109,6 +111,14 @@ exports.reviewComplete = asyncHandler(async (req, res) => {
 exports.getComparison = asyncHandler(async (req, res) => {
   const rfqId = req.params.id;
 
+  // The buyer's original ask — used below to flag items vendors missed, added
+  // without being asked, or quoted at a mismatched quantity/price.
+  const rfq = await Rfq.findOne({
+    where: { id: rfqId, company_id: req.companyId },
+    include: [{ model: PurchaseRequest, include: [{ model: PurchaseRequestItem, as: 'items', include: [Item] }] }],
+  });
+  const requestedItems = rfq?.PurchaseRequest?.items || [];
+
   const allQuotes = await Quote.findAll({
     where: { company_id: req.companyId, status: { [Op.notIn]: ['superseded', 'rejected'] } },
     include: [
@@ -153,28 +163,49 @@ exports.getComparison = asyncHandler(async (req, res) => {
     }
   }
 
-  const comparison = quotes.map((q) => ({
-    quote_id: q.id,
-    vendor: { id: q.Vendor?.id, name: q.Vendor?.name, rating: q.Vendor?.rating },
-    total_amount: q.total_amount,
-    landed_cost: (parseFloat(q.total_amount) || 0) +
-      (q.items || []).reduce((s, i) => s + parseFloat(i.freight || 0) + parseFloat(i.tax || 0), 0),
-    delivery_time_days: q.delivery_time_days,
-    payment_terms: q.payment_terms,
-    validity_date: q.validity_date,
-    ai_recommended: q.ai_recommended,
-    ai_confidence: q.ai_confidence,
-    extraction_status: q.extraction_status,
-    extraction_note: q.extraction_note,
-    items: q.items,
-  }));
+  const comparison = quotes.map((q) => {
+    // Only diff against the buyer's request once extraction has actually produced
+    // items — otherwise every item would misleadingly show as "not quoted".
+    const requestedItemComparison = q.extraction_status === 'done'
+      ? compareQuoteToRequestedItems(q.items || [], requestedItems)
+      : [];
+    const hasRequestMismatch = requestedItemComparison.some((c) => c.status !== 'matched');
+
+    return {
+      quote_id: q.id,
+      vendor: { id: q.Vendor?.id, name: q.Vendor?.name, rating: q.Vendor?.rating },
+      total_amount: q.total_amount,
+      landed_cost: (parseFloat(q.total_amount) || 0) +
+        (q.items || []).reduce((s, i) => s + parseFloat(i.freight || 0) + parseFloat(i.tax || 0), 0),
+      delivery_time_days: q.delivery_time_days,
+      payment_terms: q.payment_terms,
+      validity_date: q.validity_date,
+      ai_recommended: q.ai_recommended,
+      ai_confidence: q.ai_confidence,
+      extraction_status: q.extraction_status,
+      extraction_note: q.extraction_note,
+      items: q.items,
+      requested_item_comparison: requestedItemComparison,
+      has_request_mismatch: hasRequestMismatch,
+    };
+  });
 
   const recommendation = await AiRecommendation.findOne({
     where: { rfq_id: rfqId, company_id: req.companyId },
     order: [['created_at', 'DESC']],
   });
 
-  okResponse(res, { quotes: comparison, recommendation, failed_vendors: failedVendors });
+  okResponse(res, {
+    quotes: comparison,
+    recommendation,
+    failed_vendors: failedVendors,
+    requested_items: requestedItems.map((ri) => ({
+      id: ri.id,
+      name: ri.Item?.name || ri.item_name_freetext || 'Unknown item',
+      quantity: parseFloat(ri.quantity) || 0,
+      estimated_unit_price: ri.estimated_unit_price != null ? parseFloat(ri.estimated_unit_price) : null,
+    })),
+  });
 });
 
 exports.recommend = asyncHandler(async (req, res) => {
@@ -219,6 +250,7 @@ exports.selectVendor = asyncHandler(async (req, res) => {
         purchase_order_id: po.id, item_id: qi.item_id || null,
         item_name: qi.item_name_raw, quantity: qi.quantity,
         unit_price: qi.unit_price, total_price: qi.total_price,
+        tax: qi.tax || 0, freight: qi.freight || 0, discount: qi.discount || 0,
       })));
     }
     await audit({ companyId: req.companyId, userId: req.user.id, action: 'po.created', entityType: 'PurchaseOrder', entityId: po.id, after: { po_number, from_quote: quote.id }, ip: req.ip });
