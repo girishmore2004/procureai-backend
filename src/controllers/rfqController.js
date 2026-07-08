@@ -5,6 +5,7 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const { paginate, paginatedResponse, okResponse, errorResponse, generateCode } = require('../utils/helpers');
 const { audit } = require('../middleware/audit');
 const { sendRfqEmail, notifyUser } = require('../services/notificationService');
+const { saveBufferToDisk } = require('../middleware/upload');
 
 exports.list = asyncHandler(async (req, res) => {
   const { page, perPage, limit, offset } = paginate(req.query);
@@ -159,9 +160,22 @@ exports.publicSubmitQuote = asyncHandler(async (req, res) => {
 
   const file = req.file; // .buffer available (memory storage via vendorUpload)
 
+  // Persist the vendor's uploaded bytes to disk (same location invoice uploads
+  // already use) instead of only holding them in memory for the extraction
+  // pass. Without this, the original file was discarded right after upload —
+  // there was no way to preview it or re-extract it later.
+  let savedFile = null;
+  if (file && file.buffer) {
+    try {
+      savedFile = saveBufferToDisk(file.buffer, file.originalname);
+    } catch (e) {
+      console.error('[Quote file save] failed:', e.message);
+    }
+  }
+
   const quote = await Quote.create({
     rfq_vendor_id: rv.id, vendor_id: rv.vendor_id, company_id: rv.Rfq?.company_id,
-    source_file_url: file ? `[buffer]${file.originalname}` : null,
+    source_file_url: savedFile ? savedFile.url : null,
     source_type: file ? file.mimetype : 'manual',
     extraction_status: file ? 'pending' : 'done',
     payment_terms, delivery_time_days, validity_date, status: 'submitted',
