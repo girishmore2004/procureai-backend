@@ -316,6 +316,12 @@ const PoItem = sequelize.define('PoItem', {
   unit_price: DataTypes.DECIMAL(14, 2),
   total_price: DataTypes.DECIMAL(14, 2),
   received_quantity: { type: DataTypes.DECIMAL, defaultValue: 0 },
+  // Carried over from the selected QuoteItem when the PO is created, so invoice
+  // 3-way matching has something real to compare tax/freight/discount against
+  // instead of always showing "N/A".
+  tax: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
+  freight: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
+  discount: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
 }, { tableName: 'po_items' });
 
 const GoodsReceipt = sequelize.define('GoodsReceipt', {
@@ -368,6 +374,12 @@ const InvoiceItem = sequelize.define('InvoiceItem', {
   quantity: DataTypes.DECIMAL,
   unit_price: DataTypes.DECIMAL(14, 2),
   total_price: DataTypes.DECIMAL(14, 2),
+  // Populated by aiService.extractInvoice's LLM extraction (defaults to 0 when
+  // the invoice text doesn't mention them) so 3-way matching can flag real
+  // tax/freight/discount deltas against the linked PO line, not just totals.
+  tax: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
+  freight: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
+  discount: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
   confidence_score: DataTypes.DECIMAL(4, 3),
 }, { tableName: 'invoice_items' });
 
