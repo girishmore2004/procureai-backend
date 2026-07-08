@@ -34,6 +34,7 @@ exports.create = asyncHandler(async (req, res) => {
   await PoItem.bulkCreate(quote.items.map((qi) => ({
     purchase_order_id: po.id, item_id: qi.item_id, item_name: qi.item_name_raw,
     quantity: qi.quantity, unit_price: qi.unit_price, total_price: qi.total_price,
+    tax: qi.tax || 0, freight: qi.freight || 0, discount: qi.discount || 0,
   })));
   await audit({ companyId: req.companyId, userId: req.user.id, action: 'po.created', entityType: 'PurchaseOrder', entityId: po.id, after: { po_number }, ip: req.ip });
   okResponse(res, po, 201);
