@@ -157,6 +157,10 @@ exports.getMe = asyncHandler(async (req, res) => {
     rating: req.vendor.rating,
     portal_status: req.vendor.portal_status,
     company_id: req.vendor.company_id,
+    bank_account_number: req.vendor.bank_account_number,
+    bank_ifsc: req.vendor.bank_ifsc,
+    bank_name: req.vendor.bank_name,
+    upi_id: req.vendor.upi_id,
     profile_completeness: computeProfileCompleteness(req.vendor),
   });
 });
@@ -166,6 +170,7 @@ exports.updateMe = asyncHandler(async (req, res) => {
   const allowed = [
     'name', 'legal_name', 'contact_person', 'phone', 'whatsapp_number',
     'address', 'gstin', 'payment_terms', 'lead_time_days', 'moq', 'categories',
+    'bank_account_number', 'bank_ifsc', 'bank_name', 'upi_id',
   ];
   allowed.forEach((f) => { if (req.body[f] !== undefined) req.vendor[f] = req.body[f]; });
   await req.vendor.save();
@@ -293,4 +298,37 @@ exports.listMyOrders = asyncHandler(async (req, res) => {
     return { ...po.toJSON(), message_count: msgCount };
   }));
   okResponse(res, enriched);
+});
+
+// ── GET /vendor-portal/payments ──────────────────────────────────────
+// Vendor sees their own payment history (queued/executed/confirmed), so the
+// portal's "order, invoice, and payment history" requirement is satisfied
+// without duplicating vendor data anywhere.
+exports.listMyPayments = asyncHandler(async (req, res) => {
+  const { Payment, Invoice, PurchaseOrder } = require('../models');
+  const payments = await Payment.findAll({
+    where: { vendor_id: req.vendorId },
+    include: [{ model: Invoice }, { model: PurchaseOrder }],
+    order: [['created_at', 'DESC']],
+    limit: 50,
+  });
+  okResponse(res, payments);
+});
+
+// ── POST /vendor-portal/payments/:id/confirm ─────────────────────────
+// Vendor confirms receipt of an executed payment. This is the final step
+// of the payment sequence — the linked order is only closed here.
+exports.confirmPayment = asyncHandler(async (req, res) => {
+  const { Payment, PurchaseOrder } = require('../models');
+  const payment = await Payment.findOne({ where: { id: req.params.id, vendor_id: req.vendorId } });
+  if (!payment) return errorResponse(res, 'NOT_FOUND', 'Payment not found', 404);
+  if (payment.status !== 'executed') {
+    return errorResponse(res, 'INVALID_STATE', 'Only executed payments can be confirmed', 409);
+  }
+  await payment.update({ status: 'confirmed', confirmed_at: new Date() });
+  if (payment.purchase_order_id) {
+    await PurchaseOrder.update({ status: 'closed' }, { where: { id: payment.purchase_order_id } });
+  }
+  await audit({ companyId: payment.company_id, userId: null, action: 'payment.confirmed_by_vendor', entityType: 'Payment', entityId: payment.id, ip: req.ip });
+  okResponse(res, { message: 'Payment receipt confirmed — order closed' });
 });
