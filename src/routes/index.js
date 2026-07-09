@@ -388,7 +388,11 @@ router.post('/invoices', requirePermission('invoices.create'), upload.single('fi
 router.get('/invoices/:id', requirePermission('invoices.view'), invoices.getOne);
 router.post('/invoices/:id/match', requirePermission('invoices.view'), invoices.match);
 router.post('/invoices/:id/approve', requirePermission('invoices.approve'), invoices.approve);
-router.post('/invoices/:id/mark-paid', requirePermission('invoices.approve'), invoices.markPaid);
+// NOTE: the old direct '/invoices/:id/mark-paid' route has been removed. It let an
+// invoice go straight from 'approved' to 'paid', completely bypassing the required
+// payment sequence: invoice approved -> payment queued -> payment executed ->
+// vendor confirms -> order closed. Payment status now only ever changes via
+// POST /invoices/:id/queue-payment and POST /payments/:id/execute below.
 router.patch('/invoices/:id/items/:item_id', requirePermission('invoices.create'), invoices.updateItem);
 router.post('/invoices/:id/queue-payment', requirePermission('payments.approve'), payments.queue);
 
