@@ -1117,6 +1117,12 @@ Invoice.hasMany(InvoiceItem, { foreignKey: 'invoice_id', as: 'items' });
 InvoiceItem.belongsTo(Invoice, { foreignKey: 'invoice_id' });
 
 Item.hasOne(Inventory, { foreignKey: 'item_id' });
+// This reverse association was missing entirely — inventoryController.getInventory
+// (and billingController, which looks up stock per item) both do
+// `Inventory.findAll({ include: [{ model: Item, ... }] })`, which requires
+// Inventory.belongsTo(Item) to exist. Without it Sequelize throws
+// "Item is not associated to Inventory!" and GET /inventory 500s.
+Inventory.belongsTo(Item, { foreignKey: 'item_id' });
 Item.hasOne(ReorderRule, { foreignKey: 'item_id' });
 ReorderRule.belongsTo(Item, { foreignKey: 'item_id' });
 Item.belongsTo(Vendor, { as: 'PreferredVendor', foreignKey: 'preferred_vendor_id' });
