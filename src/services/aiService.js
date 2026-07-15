@@ -3,13 +3,31 @@ const fs = require('fs');
 const path = require('path');
 const { AiExtraction, AiRecommendation, Quote, QuoteItem, VendorScore, Vendor } = require('../models');
 
-const callLLM = async (prompt, { maxTokens = 8000, retries = 2 } = {}) => {
+// Hybrid extraction: when imageBase64 is supplied, the prompt is sent
+// alongside the actual page image (not just the OCR'd text) using the
+// model's vision input. This is what lets extraction hold up on messy
+// scans, skewed photos, low-contrast faxes, and handwriting that Tesseract
+// mangles into garbled text — the model can look at the picture itself
+// instead of trusting OCR's guess. OCR text is still generated first and
+// included in the prompt as a second reference source (see
+// extractQuoteFromFile/extractInvoice), so the model effectively
+// cross-checks one against the other. gpt-4o-mini (the default model) has
+// native vision support, so no model change is required for this to work —
+// it only activates when an image is actually passed in.
+const callLLM = async (prompt, { maxTokens = 8000, retries = 2, imageBase64 = null, imageMimeType = null } = {}) => {
   const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
   if (!apiKey) {
     console.warn('LLM_API_KEY not set — returning mock extraction');
     return { content: JSON.stringify({ items: [], vendor_name: '', payment_terms: '', delivery_time_days: 7, confidence_overall: 0 }), mock: true };
   }
+
+  const content = imageBase64
+    ? [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: `data:${imageMimeType || 'image/jpeg'};base64,${imageBase64}`, detail: 'high' } },
+      ]
+    : prompt;
 
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -22,7 +40,7 @@ const callLLM = async (prompt, { maxTokens = 8000, retries = 2 } = {}) => {
           model,
           temperature: 0,
           max_tokens: maxTokens, // without this a long multi-item quote can get cut off mid-JSON and fail to parse
-          messages: [{ role: 'user', content: prompt }],
+          messages: [{ role: 'user', content }],
           response_format: { type: 'json_object' },
         }),
       });
@@ -66,9 +84,13 @@ function tryParseJson(raw) {
   return null;
 }
 
-const EXTRACTION_PROMPT = (rawText) => `
+const EXTRACTION_PROMPT = (rawText, hasImage) => `
 You are a procurement data extraction assistant.
-Extract structured data from the following vendor quote document text.
+Extract structured data from this vendor quote document.
+${hasImage
+  ? 'You have BOTH the OCR-extracted text below AND the original document image attached. The OCR text can contain errors (misread digits, merged columns, garbled handwriting) — use the image as the primary source of truth and only fall back to the OCR text where the image is unreadable. Pay special attention to tabular line-item layouts and any handwritten quantities, prices, or annotations.'
+  : 'Only OCR-extracted text is available for this file (no image was provided).'}
+Look specifically for: item table rows (name, quantity, unit price, line total), tax/GST, freight/shipping, discounts, payment terms, delivery/lead time, quote validity date, any reference/quotation number, and vendor identification details. Numbers may use Indian numbering (₹, lakhs/commas) — normalize to plain numbers.
 Return ONLY valid JSON with this exact shape:
 {
   "vendor_name": "string",
@@ -91,10 +113,10 @@ Return ONLY valid JSON with this exact shape:
     }
   ],
   "confidence_overall": 0.0 to 1.0,
-  "notes": "any other relevant info"
+  "notes": "any other relevant info — include any reference/quotation number and vendor contact details found here since there is no dedicated field for them"
 }
-If a field is unclear set it to null and lower confidence_score.
-Document text:
+If a field is unclear (including because handwriting or scan quality made it illegible) set it to null and lower confidence_score — never guess a number you cannot actually read.
+OCR text:
 ---
 ${rawText}
 ---
@@ -130,19 +152,54 @@ async function loadFileBuffer(filePathOrUrl) {
   }
 }
 
+// Runs OCR with a page-segmentation mode tuned for line-item documents
+// (PSM 6 — "assume a single uniform block of text", which handles
+// tables/columns of items noticeably better than Tesseract's PSM 3 default
+// meant for general mixed-layout pages). If that first pass comes back
+// mostly empty (a photographed/skewed/low-contrast page can confuse PSM 6),
+// it retries once with PSM 3 before giving up — a cheap way to meaningfully
+// improve success rate on messy real-world scans without adding a new
+// dependency. Handwriting recognition is a genuine limitation of Tesseract
+// (an LSTM engine trained overwhelmingly on printed text) — the two-pass OCR
+// here is combined with sending the raw image itself to the vision-capable
+// LLM (see callLLM's imageBase64 option) as the actual mechanism that lets
+// handwritten/messy documents extract at all, since the model can read the
+// picture directly instead of relying solely on Tesseract's text guess.
+async function runOcr(buffer) {
+  const tryPsm = async (psm) => {
+    const worker = await Tesseract.createWorker('eng', undefined, { logger: () => {} });
+    try {
+      await worker.setParameters({ tessedit_pageseg_mode: psm });
+      const { data: { text } } = await worker.recognize(buffer);
+      return text || '';
+    } finally {
+      await worker.terminate();
+    }
+  };
+
+  try {
+    const first = await tryPsm('6');
+    if (first && first.trim().length > 20) return first;
+    const second = await tryPsm('3');
+    return (second && second.trim().length > (first || '').trim().length) ? second : first;
+  } catch (e) {
+    console.warn('[OCR] recognition failed:', e.message);
+    return '';
+  }
+}
+
 // Reads text from a Buffer — never touches disk, works for all file types
 async function extractTextFromBuffer(buffer, mimetype, originalname) {
   const ext = path.extname(originalname || '').toLowerCase();
 
   if (['image/jpeg', 'image/jpg', 'image/png', 'image/tiff', 'image/bmp', 'image/gif'].includes(mimetype) ||
       ['.jpg', '.jpeg', '.png', '.tiff', '.bmp', '.gif'].includes(ext)) {
-    const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
-    return text;
+    return await runOcr(buffer);
   }
 
   if (mimetype === 'application/pdf' || ext === '.pdf') {
     try {
-      const { data: { text } } = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
+      const text = await runOcr(buffer);
       if (text && text.trim().length > 20) return text;
       return buffer.toString('utf8');
     } catch {
@@ -198,15 +255,22 @@ async function extractQuoteFromFile(quoteId, fileSource, mimetypeHint, originalN
         mimetype = m[ext] || '';
       }
     }
+    const isImage = /^image\//.test(mimetype);
     const rawText = await extractTextFromBuffer(buffer, mimetype, originalname);
-    if (!rawText || !rawText.trim()) {
+    // For images, an unreadable OCR pass isn't fatal — the LLM can still read
+    // the picture directly (hybrid path below), so only bail out here for
+    // non-image files where there's no image fallback to lean on.
+    if (!isImage && (!rawText || !rawText.trim())) {
       // Nothing readable came out of the file itself (corrupt/blank/unsupported format) —
       // there's no point calling the LLM on empty input.
       await quote.update({ extraction_status: 'needs_review', extraction_note: 'Could not read any text/data from the uploaded file. Please re-upload or enter the quote manually.' });
       return null;
     }
 
-    const { content: llmResponse, mock, truncated } = await callLLM(EXTRACTION_PROMPT(rawText));
+    const { content: llmResponse, mock, truncated } = await callLLM(
+      EXTRACTION_PROMPT(rawText || '(OCR produced no readable text — read directly from the attached image)', isImage),
+      isImage ? { imageBase64: buffer.toString('base64'), imageMimeType: mimetype } : {}
+    );
     const structured = tryParseJson(llmResponse);
 
     if (!structured) {
@@ -367,13 +431,28 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
   if (!invoice) throw new Error('Invoice not found');
 
   const buffer = await loadFileBuffer(filePath);
+  const isImage = /^image\//.test(mimetype || '');
   const rawText = await extractTextFromBuffer(buffer, mimetype, originalname || filePath);
-  if (!rawText || rawText.trim().length < 10) {
+  // Same reasoning as extractQuoteFromFile: for images the LLM's vision pass
+  // can still succeed even when OCR text comes back empty/garbled, so only
+  // treat "no readable text" as fatal when there's no image to fall back to.
+  if (!isImage && (!rawText || rawText.trim().length < 10)) {
     throw new Error('Could not read any text from this invoice file. Try a clearer scan or enter the values manually.');
   }
 
-  const prompt = `Extract invoice data from this text. Return JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, tax, freight, discount, confidence_score}], confidence_overall }. Set tax, freight, and discount to 0 if the document doesn't mention them for a line. Text:\n${rawText}`;
-  const { content, mock } = await callLLM(prompt);
+  const prompt = `Extract invoice data from this document.
+${isImage
+  ? 'Both OCR text (below) and the original invoice image are attached. Treat the image as the primary source of truth — OCR text can misread digits, merge table columns, or mangle handwritten entries — and only rely on the OCR text where the image itself is unreadable.'
+  : 'Only OCR-extracted text is available (no image was provided).'}
+Look for the item table (name, quantity, unit price, line total), tax/GST, freight/shipping, discounts, the invoice number, invoice date, vendor name, and any PO/reference number mentioned. Numbers may use Indian numbering (₹, lakhs/commas) — normalize to plain numbers.
+Return ONLY valid JSON: { vendor_name, invoice_number, invoice_date (YYYY-MM-DD), total_amount, items: [{item_name_raw, quantity, unit_price, total_price, tax, freight, discount, confidence_score}], confidence_overall }.
+Set tax, freight, and discount to 0 if the document doesn't mention them for a line. If a value is illegible (including due to handwriting or scan quality), set it to null rather than guessing, and lower confidence_score.
+OCR text:
+${rawText || '(OCR produced no readable text — read directly from the attached image)'}`;
+  const { content, mock } = await callLLM(
+    prompt,
+    isImage ? { imageBase64: buffer.toString('base64'), imageMimeType: mimetype } : {}
+  );
   const structured = tryParseJson(content);
   if (!structured) {
     await invoice.update({ mismatch_reason: 'AI response could not be parsed as JSON — please review this invoice manually.' });
@@ -424,12 +503,14 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
 // Pre-validation: extract from buffer WITHOUT writing to DB.
 // Vendor uploads file → we extract → return items for frontend preview → vendor confirms → submit.
 async function validateQuoteFile(buffer, mimetype, originalname) {
+  const isImage = /^image\//.test(mimetype || '');
   const rawText = await extractTextFromBuffer(buffer, mimetype, originalname);
-  if (!rawText || rawText.trim().length < 10) {
+  if (!isImage && (!rawText || rawText.trim().length < 10)) {
     throw new Error('Could not read any text from this file. Try a clearer scan or enter manually.');
   }
   const { content, mock, truncated } = await callLLM(
-    EXTRACTION_PROMPT(rawText), { maxTokens: 8000 }
+    EXTRACTION_PROMPT(rawText || '(OCR produced no readable text — read directly from the attached image)', isImage),
+    { maxTokens: 8000, ...(isImage ? { imageBase64: buffer.toString('base64'), imageMimeType: mimetype } : {}) }
   );
   const structured = tryParseJson(content);
   if (!structured) throw new Error('AI could not parse the file contents. Please enter your quote manually.');
