@@ -75,8 +75,61 @@ exports.remove = asyncHandler(async (req, res) => {
 });
 
 exports.listRoles = asyncHandler(async (req, res) => {
-  const roles = await Role.findAll({ where: { company_id: req.companyId }, include: [Permission] });
+  const roles = await Role.findAll({ where: { company_id: req.companyId }, include: [Permission], order: [['created_at', 'ASC']] });
   okResponse(res, roles);
+});
+
+// GET /permissions — the full permission catalog, used by the role editor
+// UI to render one checkbox per permission code. Not company-scoped:
+// permissions are global definitions (code + description), same set every
+// company draws from — only the Role <-> Permission mapping is per-company.
+exports.listPermissions = asyncHandler(async (req, res) => {
+  const permissions = await Permission.findAll({ order: [['code', 'ASC']] });
+  okResponse(res, permissions);
+});
+
+// POST /roles — previously did not exist at all. A company could list its
+// roles and edit an existing role's permissions, but had no way to create a
+// new one, so real (non-seeded) companies were permanently stuck with
+// whatever roles signup happened to create. Lets an admin build custom
+// roles beyond the starter set, or recreate one they deleted.
+exports.createRole = asyncHandler(async (req, res) => {
+  const { name, permission_ids } = req.body;
+  if (!name || !name.trim()) return errorResponse(res, 'VALIDATION_ERROR', 'Role name required');
+
+  const existing = await Role.findOne({ where: { company_id: req.companyId, name: name.trim() } });
+  if (existing) return errorResponse(res, 'DUPLICATE', 'A role with this name already exists', 409);
+
+  const role = await Role.create({ company_id: req.companyId, name: name.trim(), is_system: false });
+
+  if (Array.isArray(permission_ids) && permission_ids.length) {
+    const { RolePermission } = require('../models');
+    // Only permission ids that actually exist are attached — silently
+    // ignoring unknown ids rather than 500ing keeps this robust against a
+    // stale/edited client payload.
+    const validPerms = await Permission.findAll({ where: { id: permission_ids } });
+    await RolePermission.bulkCreate(validPerms.map((p) => ({ role_id: role.id, permission_id: p.id })));
+  }
+
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'role.created', entityType: 'Role', entityId: role.id, after: { name: role.name }, ip: req.ip });
+  const full = await Role.findOne({ where: { id: role.id }, include: [Permission] });
+  okResponse(res, full, 201);
+});
+
+// DELETE /roles/:id — blocked for system (starter) roles and for any role
+// still assigned to a user, so deleting a role can never silently strand
+// users with a dangling role_id or collapse the built-in segregation set.
+exports.removeRole = asyncHandler(async (req, res) => {
+  const role = await Role.findOne({ where: { id: req.params.id, company_id: req.companyId } });
+  if (!role) return errorResponse(res, 'NOT_FOUND', 'Role not found', 404);
+  if (role.is_system) return errorResponse(res, 'FORBIDDEN', 'Built-in system roles cannot be deleted', 403);
+  const inUse = await User.count({ where: { role_id: role.id, deleted_at: null } });
+  if (inUse > 0) return errorResponse(res, 'INVALID_STATE', `${inUse} user(s) still have this role — reassign them first`, 409);
+  const { RolePermission } = require('../models');
+  await RolePermission.destroy({ where: { role_id: role.id } });
+  await role.destroy();
+  await audit({ companyId: req.companyId, userId: req.user.id, action: 'role.deleted', entityType: 'Role', entityId: role.id, ip: req.ip });
+  okResponse(res, { message: 'Role deleted' });
 });
 
 exports.updateRolePermissions = asyncHandler(async (req, res) => {
