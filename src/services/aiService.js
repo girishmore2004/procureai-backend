@@ -64,14 +64,20 @@ const callLLM = async (prompt, { maxTokens = 8000, retries = 2, imageBase64 = nu
       // message instead of burning 2 more attempts and 1-1.5s of retry delay
       // on every single extraction until someone fixes the account.
       const isQuotaError = res.status === 429 && /insufficient_quota/i.test(body);
+      // Providers (Gemini especially) deprecate/retire specific model names every
+      // few months — a 404 "model ... is no longer available" is a config problem
+      // (wrong/stale LLM_MODEL), not a transient failure, and won't fix itself.
+      const isModelGoneError = res.status === 404 && /no longer available|not found|does not exist/i.test(body);
       lastErr = new Error(
         isQuotaError
           ? `LLM API account has no billing/credits configured (insufficient_quota) — this will not succeed on retry. Add billing at your provider's dashboard, or switch LLM_API_BASE_URL/LLM_API_KEY/LLM_MODEL to a provider with a free tier (e.g. Google Gemini).`
+          : isModelGoneError
+          ? `LLM_MODEL "${model}" is not available on this provider/account (HTTP 404) — model names get deprecated/retired frequently, especially on Gemini's free tier. Check your provider's current model list and update LLM_MODEL. Raw error: ${body.slice(0, 300)}`
           : `LLM API error: ${res.status}${body ? ` — ${body.slice(0, 300)}` : ''}`
       );
       // 429 (genuine rate limiting, not quota) and 5xx (provider having issues) are
-      // transient and worth retrying. insufficient_quota, and anything else
-      // (401 bad key, 400 bad request, etc.) will not succeed on retry.
+      // transient and worth retrying. insufficient_quota, a gone/renamed model, and
+      // anything else (401 bad key, 400 bad request, etc.) will not succeed on retry.
       if (res.status === 429 && !isQuotaError && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
       if (res.status >= 500 && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
       throw lastErr;
@@ -224,6 +230,11 @@ async function extractPdfText(buffer) {
     useSystemFonts: false,
     disableFontFace: true,
     isEvalSupported: false,
+    // pdfjs logs its own warnings straight to console (missing standard font
+    // files, DOMMatrix/Path2D polyfill notices) even though none of that
+    // affects text extraction — verbosity: 0 silences those without touching
+    // our own error handling/logging above.
+    verbosity: 0,
   }).promise;
 
   let text = '';
