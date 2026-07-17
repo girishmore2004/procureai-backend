@@ -188,6 +188,37 @@ async function runOcr(buffer) {
   }
 }
 
+// Extracts the embedded text layer from a PDF using pdfjs-dist — NOT OCR.
+// This only works for PDFs that have real text content (the overwhelming
+// majority of vendor quotes/invoices: anything from accounting software,
+// Word/Excel/Google Docs exports, or a quotation template). For a genuinely
+// scanned/photographed PDF with no text layer, this correctly returns an
+// empty string rather than attempting anything risky — see the comment on
+// extractTextFromBuffer's PDF branch for why we do not fall back to OCR here.
+async function extractPdfText(buffer) {
+  // pdfjs-dist v4 ships ESM-only; dynamic import() is the standard, fully
+  // supported way to load an ESM package from CommonJS in Node 20.
+  const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    // Disable everything that isn't needed for plain text extraction —
+    // keeps this to a small, predictable code path with no rendering,
+    // no font-fetching, no canvas involvement at all.
+    useSystemFonts: false,
+    disableFontFace: true,
+    isEvalSupported: false,
+  }).promise;
+
+  let text = '';
+  const maxPages = Math.min(doc.numPages, 30); // sane cap for a quote/invoice document
+  for (let i = 1; i <= maxPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it) => it.str).join(' ') + '\n';
+  }
+  return text;
+}
+
 // Reads text from a Buffer — never touches disk, works for all file types
 async function extractTextFromBuffer(buffer, mimetype, originalname) {
   const ext = path.extname(originalname || '').toLowerCase();
@@ -198,12 +229,26 @@ async function extractTextFromBuffer(buffer, mimetype, originalname) {
   }
 
   if (mimetype === 'application/pdf' || ext === '.pdf') {
+    // IMPORTANT: PDFs must NEVER be passed to Tesseract/runOcr. Tesseract's
+    // underlying image library (Leptonica) cannot decode the PDF container
+    // format at all, and critically, when that decode fails it does not
+    // reliably surface as a catchable promise rejection — it has crashed
+    // the entire Node process in production (every user, not just this
+    // request) rather than failing just this one upload. There is no
+    // try/catch that can safely guard against that failure mode, so the
+    // only safe fix is to never make that call in the first place.
     try {
-      const text = await runOcr(buffer);
+      const text = await extractPdfText(buffer);
       if (text && text.trim().length > 20) return text;
-      return buffer.toString('utf8');
-    } catch {
-      return buffer.toString('utf8');
+      // Text layer was empty/near-empty — this is very likely a scanned or
+      // photographed PDF with no real text content. We deliberately do NOT
+      // attempt OCR on it (see above). Surfacing this clearly to the vendor/
+      // buyer as "please re-upload as a photo" is far better than a silent
+      // near-empty extraction or, worse, a server crash.
+      return '';
+    } catch (e) {
+      console.warn('[PDF] text-layer extraction failed:', e.message);
+      return '';
     }
   }
 
@@ -263,7 +308,7 @@ async function extractQuoteFromFile(quoteId, fileSource, mimetypeHint, originalN
     if (!isImage && (!rawText || !rawText.trim())) {
       // Nothing readable came out of the file itself (corrupt/blank/unsupported format) —
       // there's no point calling the LLM on empty input.
-      await quote.update({ extraction_status: 'needs_review', extraction_note: 'Could not read any text/data from the uploaded file. Please re-upload or enter the quote manually.' });
+      await quote.update({ extraction_status: 'needs_review', extraction_note: 'Could not read any text from this file. If this is a scanned or photographed PDF (no selectable text), please upload it as a JPG/PNG photo instead — PDF image-scanning is not supported, only PDFs with real embedded text. Otherwise, enter the quote manually below.' });
       return null;
     }
 
@@ -437,7 +482,7 @@ async function extractInvoice(invoiceId, filePath, mimetype, originalname) {
   // can still succeed even when OCR text comes back empty/garbled, so only
   // treat "no readable text" as fatal when there's no image to fall back to.
   if (!isImage && (!rawText || rawText.trim().length < 10)) {
-    throw new Error('Could not read any text from this invoice file. Try a clearer scan or enter the values manually.');
+    throw new Error('Could not read any text from this invoice file. If this is a scanned or photographed PDF, please upload it as a JPG/PNG photo instead — PDF image-scanning is not supported, only PDFs with real embedded text. Otherwise, enter the values manually.');
   }
 
   const prompt = `Extract invoice data from this document.
@@ -506,7 +551,7 @@ async function validateQuoteFile(buffer, mimetype, originalname) {
   const isImage = /^image\//.test(mimetype || '');
   const rawText = await extractTextFromBuffer(buffer, mimetype, originalname);
   if (!isImage && (!rawText || rawText.trim().length < 10)) {
-    throw new Error('Could not read any text from this file. Try a clearer scan or enter manually.');
+    throw new Error('Could not read any text from this file. If this is a scanned or photographed PDF, please upload it as a JPG/PNG photo instead — PDF image-scanning is not supported, only PDFs with real embedded text. Otherwise, enter manually.');
   }
   const { content, mock, truncated } = await callLLM(
     EXTRACTION_PROMPT(rawText || '(OCR produced no readable text — read directly from the attached image)', isImage),
