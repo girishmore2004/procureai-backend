@@ -66,6 +66,7 @@ router.get('/vendor-portal/documents',        verifyVendorToken, vendorAuth.list
 router.post('/vendor-portal/documents',       verifyVendorToken, upload.single('file'), vendorAuth.uploadDocument);
 // Vendor sees their own POs and messages
 router.get('/vendor-portal/orders',                        verifyVendorToken, vendorAuth.listMyOrders);
+router.get('/vendor-portal/quote-requests',                verifyVendorToken, vendorAuth.listMyQuoteRequests);
 router.get('/vendor-portal/orders/:id/messages',           verifyVendorToken, messages.vendorListForPO);
 router.post('/vendor-portal/orders/:id/messages',          verifyVendorToken, messages.vendorReplyOnPO);
 // Vendor payment history + receipt confirmation (final step of payment sequence)
