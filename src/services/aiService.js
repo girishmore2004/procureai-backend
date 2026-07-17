@@ -17,6 +17,12 @@ const { AiExtraction, AiRecommendation, Quote, QuoteItem, VendorScore, Vendor } 
 const callLLM = async (prompt, { maxTokens = 8000, retries = 2, imageBase64 = null, imageMimeType = null } = {}) => {
   const apiKey = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL || 'gpt-4o-mini';
+  // Defaults to OpenAI's own endpoint, but any OpenAI-compatible provider
+  // works by just setting LLM_API_BASE_URL — e.g. Google Gemini's free-tier
+  // compatibility endpoint (https://generativelanguage.googleapis.com/v1beta/openai),
+  // which supports the same chat/completions shape including vision and
+  // JSON response format, no code change required to switch.
+  const baseUrl = (process.env.LLM_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
   if (!apiKey) {
     console.warn('LLM_API_KEY not set — returning mock extraction');
     return { content: JSON.stringify({ items: [], vendor_name: '', payment_terms: '', delivery_time_days: 7, confidence_overall: 0 }), mock: true };
@@ -33,7 +39,7 @@ const callLLM = async (prompt, { maxTokens = 8000, retries = 2, imageBase64 = nu
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res;
     try {
-      res = await fetch('https://api.openai.com/v1/chat/completions', {
+      res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -53,10 +59,21 @@ const callLLM = async (prompt, { maxTokens = 8000, retries = 2, imageBase64 = nu
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      lastErr = new Error(`LLM API error: ${res.status}${body ? ` — ${body.slice(0, 300)}` : ''}`);
-      // 429 (rate limited) and 5xx (provider having issues) are transient and worth retrying.
-      // Anything else (401 bad key, 400 bad request, etc.) will not succeed on retry.
-      if ((res.status === 429 || res.status >= 500) && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
+      // insufficient_quota specifically means the account has no billing/credits
+      // configured — retrying will never succeed, so fail fast with a clear
+      // message instead of burning 2 more attempts and 1-1.5s of retry delay
+      // on every single extraction until someone fixes the account.
+      const isQuotaError = res.status === 429 && /insufficient_quota/i.test(body);
+      lastErr = new Error(
+        isQuotaError
+          ? `LLM API account has no billing/credits configured (insufficient_quota) — this will not succeed on retry. Add billing at your provider's dashboard, or switch LLM_API_BASE_URL/LLM_API_KEY/LLM_MODEL to a provider with a free tier (e.g. Google Gemini).`
+          : `LLM API error: ${res.status}${body ? ` — ${body.slice(0, 300)}` : ''}`
+      );
+      // 429 (genuine rate limiting, not quota) and 5xx (provider having issues) are
+      // transient and worth retrying. insufficient_quota, and anything else
+      // (401 bad key, 400 bad request, etc.) will not succeed on retry.
+      if (res.status === 429 && !isQuotaError && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
+      if (res.status >= 500 && attempt < retries) { await new Promise((r) => setTimeout(r, 500 * (attempt + 1))); continue; }
       throw lastErr;
     }
 
